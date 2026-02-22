@@ -337,47 +337,97 @@ class VectorEngine:
 # ===========================================================================
 
 def _print_metrics_table(metrics: dict) -> None:
-    """使用 Unicode 制表符在控制台打印美观的绩效指标表格。"""
+    """使用 Unicode 制表符在控制台打印美观的绩效指标表格。
+
+    中文字符在等宽终端中占 2 列宽度，需要用显示宽度而非字符数来对齐。
+    """
+
+    def _display_width(s: str) -> int:
+        """计算字符串在等宽终端中的显示列宽（中/日/韩字符占 2 列，其余占 1 列）。"""
+        width = 0
+        for ch in s:
+            cp = ord(ch)
+            # CJK Unified Ideographs, CJK Extension, CJK Compatibility,
+            # CJK Symbols, Hiragana, Katakana, Hangul, Fullwidth Forms 等
+            if (
+                (0x1100 <= cp <= 0x11FF)   # Hangul Jamo
+                or (0x2E80 <= cp <= 0x9FFF)  # CJK 各区块（含部首、统一表意文字）
+                or (0xA000 <= cp <= 0xA4CF)  # Yi Syllables
+                or (0xAC00 <= cp <= 0xD7AF)  # Hangul Syllables
+                or (0xF900 <= cp <= 0xFAFF)  # CJK Compatibility Ideographs
+                or (0xFE10 <= cp <= 0xFE1F)  # Vertical Forms
+                or (0xFE30 <= cp <= 0xFE4F)  # CJK Compatibility Forms
+                or (0xFF01 <= cp <= 0xFF60)  # Fullwidth Latin / Katakana
+                or (0xFFE0 <= cp <= 0xFFE6)  # Fullwidth Signs
+                or (0x20000 <= cp <= 0x2FFFD) # CJK Extension B-F
+            ):
+                width += 2
+            else:
+                width += 1
+        return width
+
+    def _ljust_display(s: str, width: int, fill: str = ' ') -> str:
+        """按显示宽度左对齐，不足则补 fill。"""
+        pad = width - _display_width(s)
+        return s + fill * max(pad, 0)
+
+    def _center_display(s: str, width: int, fill: str = ' ') -> str:
+        """按显示宽度居中。"""
+        pad = width - _display_width(s)
+        left = pad // 2
+        right = pad - left
+        return fill * left + s + fill * right
 
     def fmt(key: str, val) -> str:
-        """格式化指标值。"""
+        """格式化指标值为右对齐字符串（纯 ASCII，固定宽度）。"""
         if val is None or (isinstance(val, float) and np.isnan(val)):
-            return "  N/A"
+            return "N/A"
         pct_keys = {"年化收益率", "年化波动率", "最大回撤", "日均换手率", "年化手续费", "IC_胜率"}
         if key in pct_keys:
-            return f"{val * 100:>8.2f}%"
+            return f"{val * 100:+.2f}%"
+        elif key in {"Sharpe_Ratio", "Calmar_Ratio", "Fitness"}:
+            return f"{val:+.4f}"
         elif key in {"IC_Mean", "IC_Std", "ICIR", "IC_t统计量"}:
-            return f"{val:>8.4f} "
+            return f"{val:+.4f}"
         else:
-            return f"{val:>8.4f} "
+            return f"{val:+.4f}"
 
-    title = " QuantAlpha Engine — 回测绩效报告 "
-    width = 46
+    # ── 布局参数 ────────────────────────────────────────────
+    # 总显示宽度：2（前缀空格） + LABEL_W + 3（空格+│+空格） + VAL_W + 2（后缀空格）
+    LABEL_W = 14   # 标签列显示宽度（汉字占2列，故能容纳约7个汉字）
+    VAL_W   = 12   # 值列宽度（纯 ASCII，rjust 即可）
+    SEP     = " │ "
+    INNER_W = 2 + LABEL_W + len(SEP) + VAL_W + 2   # = 2+14+3+12+2 = 33 列
 
-    print("\n" + "╔" + "═" * width + "╗")
-    print("║" + title.center(width) + "║")
-    print("╠" + "═" * width + "╣")
+    # 标题行（同样用显示宽度居中）
+    title_text = " QuantAlpha Engine — 回测绩效报告 "
+
+    print()
+    print("╔" + "═" * INNER_W + "╗")
+    print("║" + _center_display(title_text, INNER_W) + "║")
+    print("╠" + "═" * INNER_W + "╣")
 
     display_order = [
-        ("年化收益率",  "年化收益率"),
-        ("年化波动率",  "年化波动率"),
-        ("Sharpe_Ratio", "Sharpe Ratio"),
+        ("年化收益率",    "年化收益率"),
+        ("年化波动率",    "年化波动率"),
+        ("Sharpe_Ratio",  "Sharpe Ratio"),
         ("Calmar_Ratio",  "Calmar Ratio"),
-        ("最大回撤",     "最大回撤"),
-        ("IC_Mean",      "IC 均值"),
-        ("IC_Std",       "IC 标准差"),
-        ("ICIR",         "ICIR"),
-        ("IC_胜率",       "IC 胜率"),
-        ("IC_t统计量",    "IC t-stat"),
-        ("日均换手率",    "日均换手率"),
-        ("年化手续费",    "年化手续费"),
-        ("Fitness",      "Fitness"),
+        ("最大回撤",      "最大回撤"),
+        ("IC_Mean",       "IC 均值"),
+        ("IC_Std",        "IC 标准差"),
+        ("ICIR",          "ICIR"),
+        ("IC_胜率",        "IC 胜率"),
+        ("IC_t统计量",     "IC t-stat"),
+        ("日均换手率",     "日均换手率"),
+        ("年化手续费",     "年化手续费"),
+        ("Fitness",       "Fitness"),
     ]
 
     for key, label in display_order:
         val = metrics.get(key, np.nan)
-        val_str = fmt(key, val)
-        label_padded = label.ljust(16)
-        print(f"║  {label_padded}│{val_str.rjust(26)}  ║")
+        val_str = fmt(key, val).rjust(VAL_W)           # 值右对齐，固定 VAL_W 列
+        label_str = _ljust_display(label, LABEL_W)     # 标签按显示宽度左对齐
+        print(f"║  {label_str}{SEP}{val_str}  ║")
 
-    print("╚" + "═" * width + "╝\n")
+    print("╚" + "═" * INNER_W + "╝")
+    print()

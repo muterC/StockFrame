@@ -47,6 +47,66 @@ if TYPE_CHECKING:
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
+# 中文字体配置：自动寻找系统中可用的 CJK 字体
+# ---------------------------------------------------------------------------
+
+def _setup_chinese_font() -> None:
+    """
+    自动配置 Matplotlib 中文字体，兼容 Windows / macOS / Linux。
+
+    优先顺序（Windows 优先，其次 macOS，再次 Linux 常见字体）：
+    微软雅黑 → 黑体 → 思源黑体 → PingFang → Hiragino → Noto → WenQuanYi
+
+    若均不可用，回退到英文显示（不崩溃，但中文显示为方块）。
+    """
+    from matplotlib import font_manager
+
+    CJK_CANDIDATES = [
+        # Windows
+        "Microsoft YaHei",     # 微软雅黑
+        "SimHei",              # 黑体
+        "SimSun",              # 宋体
+        "KaiTi",               # 楷体
+        "FangSong",            # 仿宋
+        # macOS
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "STHeiti",
+        "STSong",
+        # Linux / 开源
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "WenQuanYi Zen Hei",
+        "WenQuanYi Micro Hei",
+        "Source Han Sans SC",
+        "Droid Sans Fallback",
+    ]
+
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    chosen = None
+    for name in CJK_CANDIDATES:
+        if name in available:
+            chosen = name
+            break
+
+    if chosen:
+        plt.rcParams["font.family"] = "sans-serif"
+        # 将选中的中文字体放在最前面，后跟通用 sans-serif 备选
+        existing = plt.rcParams.get("font.sans-serif", [])
+        if not isinstance(existing, list):
+            existing = list(existing)
+        # 去重并插到最前
+        new_list = [chosen] + [f for f in existing if f != chosen]
+        plt.rcParams["font.sans-serif"] = new_list
+    # 修复负号乱码问题（无论是否找到中文字体都需要设置）
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+# 模块加载时执行一次
+_setup_chinese_font()
+
+
+# ---------------------------------------------------------------------------
 # 全局样式配置
 # ---------------------------------------------------------------------------
 _COLORS = {

@@ -8,7 +8,8 @@ AlphaOps — QuantAlpha_Engine 算子库
 --------
 时序类 (Time-Series)
     Ts_Sum, Ts_Mean, Ts_Max, Ts_Min, Ts_Delta, Ts_Delay,
-    Ts_Std, Ts_Rank, Ts_Corr
+    Ts_Std, Ts_Rank, Ts_Corr,
+    Ts_Skew, Ts_Kurt, Ts_Autocorr, Ts_Hurst
 
 截面类 (Cross-Sectional)
     Rank, ZScore, Scale
@@ -16,11 +17,22 @@ AlphaOps — QuantAlpha_Engine 算子库
 特殊类 (Special)
     Decay_Linear, Neutralize
 
+量价因子 (Price-Volume)
+    VWAP, PVDeviation, Amihud
+
+动量因子 (Momentum)
+    RiskAdjMomentum, PricePathQuality, RangeBreakout
+
+技术指标 (Technical)
+    RSI, KDJ, MACD
+
 用法示例
 --------
 >>> from quant_alpha_engine.ops import AlphaOps as op
 >>> factor = op.Rank(op.Ts_Delta(close, 20))
 >>> factor2 = op.Neutralize(op.Rank(op.Ts_Corr(volume, close, 10)), industry)
+>>> f_rsi  = op.RSI(close, window=14)
+>>> f_macd = op.MACD(close, fast=12, slow=26, signal=9)
 """
 
 from __future__ import annotations
@@ -30,6 +42,7 @@ from typing import Union
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr, pearsonr
 
 # 屏蔽 rolling apply 中可能出现的 NaN 警告
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -326,3 +339,538 @@ class AlphaOps:
                 result.loc[date, common_stocks] = row
 
         return result
+
+    # ==================================================================
+    # 时序类扩展算子 (Time-Series Extended)
+    # ==================================================================
+
+    @staticmethod
+    def Ts_Skew(df: pd.DataFrame, window: int) -> pd.DataFrame:
+        """
+        滚动偏度（三阶标准矩）。
+
+        衡量窗口内收益率分布的不对称程度：
+          - 正偏度（右偏）：右尾长，极端正收益概率更高
+          - 负偏度（左偏）：左尾长，极端负收益概率更高
+
+        数学定义：
+            Skew = E[(X - μ)³] / σ³
+
+        Parameters
+        ----------
+        df     : 输入矩阵 (T × N)，通常为收益率序列
+        window : 滚动窗口大小（至少需要 3 个样本）
+
+        Returns
+        -------
+        pd.DataFrame : 与 df 同形状，前 window-1 行为 NaN
+        """
+        return df.rolling(window=window, min_periods=max(3, window)).skew()
+
+    @staticmethod
+    def Ts_Kurt(df: pd.DataFrame, window: int) -> pd.DataFrame:
+        """
+        滚动峰度（四阶标准矩，超额峰度）。
+
+        衡量窗口内分布尾部厚度：
+          - 正超额峰度（> 0）：尖峰厚尾，极端值更频繁（正态分布 = 0）
+          - 负超额峰度（< 0）：扁峰薄尾，分布更集中
+
+        数学定义（Fisher 超额峰度）：
+            Kurt = E[(X - μ)⁴] / σ⁴ - 3
+
+        Parameters
+        ----------
+        df     : 输入矩阵 (T × N)
+        window : 滚动窗口大小（至少需要 4 个样本）
+
+        Returns
+        -------
+        pd.DataFrame : 超额峰度，正态分布对应值为 0
+        """
+        return df.rolling(window=window, min_periods=max(4, window)).kurt()
+
+    @staticmethod
+    def Ts_Autocorr(
+        df: pd.DataFrame,
+        lag: int,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        滚动自相关系数（lag 阶 Pearson 自相关）。
+
+        衡量时间序列在 lag 期滞后下的线性相关性：
+          - 正自相关：序列有趋势性（动量）
+          - 负自相关：序列有反转性（均值回归）
+
+        数学定义：
+            AutoCorr(lag) = corr(Xₜ, Xₜ₋ₗₐ₉) in rolling window
+
+        Parameters
+        ----------
+        df     : 输入矩阵 (T × N)
+        lag    : 滞后阶数（天数）
+        window : 滚动窗口大小，须满足 window > lag
+
+        Returns
+        -------
+        pd.DataFrame : 值域 [-1, 1]
+
+        Notes
+        -----
+        基于 pandas rolling.corr 实现全向量化计算，无显式循环。
+        """
+        if window <= lag:
+            raise ValueError(
+                f"window ({window}) 必须大于 lag ({lag})，"
+                f"否则无法计算有效的自相关系数。"
+            )
+        return df.rolling(window=window, min_periods=window).corr(df.shift(lag))
+
+    @staticmethod
+    def Ts_Hurst(df: pd.DataFrame, window: int) -> pd.DataFrame:
+        """
+        滚动 Hurst 指数（基于 R/S 分析的单尺度近似）。
+
+        Hurst 指数 H 衡量时间序列的长程依赖性（分形维度）：
+          - H ≈ 0.5 → 随机游走（布朗运动），无记忆性
+          - H > 0.5 → 持续性趋势，过去涨则未来更可能继续涨
+          - H < 0.5 → 反持续性（均值回归），过去涨则未来更可能跌
+
+        R/S 分析（Rescaled Range Analysis）：
+            1. 计算窗口均值 μ
+            2. 累积偏差序列 Y(t) = Σ(X(i) - μ)
+            3. 极差 R = max(Y) - min(Y)
+            4. 标准差 S = std(X)
+            5. H = log(R/S) / log(n/2)（单尺度近似，n = 窗口长度）
+
+        Parameters
+        ----------
+        df     : 输入矩阵 (T × N)，通常为对数收益率序列（使用前请取 log return）
+        window : 滚动窗口大小（建议 ≥ 20，越大越稳定）
+
+        Returns
+        -------
+        pd.DataFrame : 值域理论为 (0, 1)，实际约在 [0.3, 0.8]
+
+        Notes
+        -----
+        使用 rolling.apply(raw=True) 实现，`raw=True` 传递 numpy 数组
+        而非 Series 对象，避免了 Python 对象开销（约快 10 倍）。
+        """
+        def _hurst_scalar(x: np.ndarray) -> float:
+            """单窗口 R/S Hurst 估计。"""
+            n = len(x)
+            if n < 8:
+                return np.nan
+            # 过滤 NaN
+            x = x[~np.isnan(x)]
+            if len(x) < 8:
+                return np.nan
+            mean_x   = x.mean()
+            deviation = np.cumsum(x - mean_x)
+            R = deviation.max() - deviation.min()    # 极差
+            S = x.std(ddof=1)                        # 标准差
+            if S < 1e-10:
+                return np.nan
+            return np.log(R / S) / np.log(len(x) / 2)
+
+        return df.rolling(
+            window=window, min_periods=max(8, window // 2)
+        ).apply(_hurst_scalar, raw=True)
+
+    # ==================================================================
+    # 量价因子 (Price-Volume)
+    # ==================================================================
+
+    @staticmethod
+    def VWAP(
+        close: pd.DataFrame,
+        volume: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        成交量加权平均价（VWAP，Volume Weighted Average Price）。
+
+        在滚动窗口内，以成交量为权重计算加权平均价格：
+            VWAP = Σ(Pᵢ × Vᵢ) / ΣVᵢ，对 i ∈ [t-window+1, t]
+
+        VWAP 常被视为短期均衡价格基准，高于 VWAP 时为卖压强信号，
+        低于 VWAP 时为买盘强信号。
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        volume : 成交量矩阵 (T × N)，单位任意
+        window : 滚动窗口大小
+
+        Returns
+        -------
+        pd.DataFrame : VWAP 矩阵 (T × N)，量纲与 close 相同
+        """
+        pv = close * volume
+        vwap = (
+            pv.rolling(window=window, min_periods=window).sum()
+            / volume.rolling(window=window, min_periods=window).sum()
+        )
+        return vwap
+
+    @staticmethod
+    def PVDeviation(
+        close: pd.DataFrame,
+        volume: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        量价背离指标（Price-Volume Deviation）。
+
+        衡量当前收盘价与 VWAP 的标准化偏差：
+            PVDev = (Close - VWAP) / RollingStd(Close, window)
+
+        经济含义：
+          - PVDev > 0：价格高于近期量加权均价（相对超买）
+          - PVDev < 0：价格低于近期量加权均价（相对超卖）
+          - 结合成交量分析：量缩价升（PVDev > 0 + 缩量）为强势信号
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        volume : 成交量矩阵 (T × N)
+        window : 计算 VWAP 和标准差的滚动窗口
+
+        Returns
+        -------
+        pd.DataFrame : 标准化量价偏差，值域无界（典型范围 [-3, 3]）
+        """
+        vwap    = AlphaOps.VWAP(close, volume, window)
+        std_    = close.rolling(window=window, min_periods=window).std()
+        std_[std_ < 1e-10] = np.nan
+        return (close - vwap) / std_
+
+    @staticmethod
+    def Amihud(
+        close: pd.DataFrame,
+        volume: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        Amihud 非流动性因子（Amihud Illiquidity Ratio）。
+
+        衡量单位成交量引起的价格冲击，是流动性的反向指标：
+            Illiq = mean(|retₜ| / volumeₜ) for t in [t-window+1, t]
+
+        其中 ret = close/close.shift(1) - 1（日收益率绝对值）。
+
+        经济含义：
+          - Illiq 越大 → 流动性越差，小额交易引起大幅价格波动
+          - 常作为流动性溢价因子：非流动性高的股票要求更高预期收益
+          - 微盘股 Illiq 通常远高于大盘蓝筹股
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        volume : 成交量矩阵 (T × N)，建议单位为"手（100股）"或"元"
+        window : 滚动均值窗口
+
+        Returns
+        -------
+        pd.DataFrame : Amihud 比率 (T × N)，值 ≥ 0
+
+        Notes
+        -----
+        建议在使用前取对数变换 np.log(1 + Amihud) 以消除极端值。
+        成交量为 0 的行对应位置返回 NaN。
+        """
+        ret     = close.pct_change()             # 日收益率
+        safe_vol = volume.replace(0, np.nan)     # 避免除以零
+        illiq   = (ret.abs() / safe_vol).rolling(
+            window=window, min_periods=window
+        ).mean()
+        return illiq
+
+    # ==================================================================
+    # 动量因子 (Momentum)
+    # ==================================================================
+
+    @staticmethod
+    def RiskAdjMomentum(
+        close: pd.DataFrame,
+        window: int,
+        vol_window: int,
+    ) -> pd.DataFrame:
+        """
+        风险调整动量因子（Risk-Adjusted Momentum）。
+
+        经典动量因子（累计收益）除以同期波动率，衡量单位风险下的动量强度：
+            RiskAdjMom = PctChange(window) / RollingStd(ret, vol_window)
+
+        相比原始动量，风险调整动量：
+          - 剔除了高波动率驱动的虚假动量信号
+          - 对低波动率趋势股给予更高评分
+          - 与 Sharpe 比率的横截面比较含义类似
+
+        Parameters
+        ----------
+        close      : 收盘价矩阵 (T × N)
+        window     : 动量计算周期（累计收益的回看窗口，天数）
+        vol_window : 波动率计算窗口（天数），通常 vol_window < window
+
+        Returns
+        -------
+        pd.DataFrame : 风险调整动量值，值域无界（典型范围 [-5, 5]）
+        """
+        ret      = close.pct_change()
+        cum_ret  = close.pct_change(periods=window)                   # 累计收益
+        roll_vol = ret.rolling(window=vol_window, min_periods=vol_window).std()
+        roll_vol[roll_vol < 1e-10] = np.nan
+        return cum_ret / roll_vol
+
+    @staticmethod
+    def PricePathQuality(
+        close: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        路径质量因子（Price Path Quality）。
+
+        衡量价格在 window 天内趋势的"单调性"与"线性程度"：
+            PathQuality = |Spearman(t, price)| × Pearson(t, price)²
+
+        - |Spearman(t, price)|：衡量价格时序的单调性（单调上涨/下跌越强越接近 1）
+        - Pearson(t, price)²  ：衡量价格与时间的线性拟合优度（R²）
+        - 两者乘积：同时要求趋势单调且线性（锯齿形趋势得分低）
+
+        数值范围 [0, 1]：
+          - 接近 1 → 价格在窗口内近似线性单调趋势（最优趋势路径）
+          - 接近 0 → 震荡或无明显趋势
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        window : 评估窗口大小（建议 10~60 天）
+
+        Returns
+        -------
+        pd.DataFrame : 路径质量分数 (T × N)，值域 [0, 1]
+
+        Notes
+        -----
+        使用 rolling.apply(raw=True) + scipy.stats，
+        raw=True 传递 numpy 数组，性能优于 raw=False 约 10 倍。
+        """
+        def _path_quality(x: np.ndarray) -> float:
+            """计算单个窗口的路径质量分数。"""
+            n = len(x)
+            valid_mask = ~np.isnan(x)
+            x_valid = x[valid_mask]
+            if len(x_valid) < 4:
+                return np.nan
+            t = np.arange(len(x_valid), dtype=np.float64)
+            # Spearman 单调性
+            rho_result = spearmanr(t, x_valid)
+            rho = rho_result.statistic if hasattr(rho_result, 'statistic') else rho_result[0]
+            if np.isnan(rho):
+                return np.nan
+            # Pearson 线性 R²
+            r_result = pearsonr(t, x_valid)
+            r = r_result.statistic if hasattr(r_result, 'statistic') else r_result[0]
+            if np.isnan(r):
+                return np.nan
+            return float(abs(rho) * r ** 2)
+
+        return close.rolling(
+            window=window, min_periods=max(4, window // 2)
+        ).apply(_path_quality, raw=True)
+
+    @staticmethod
+    def RangeBreakout(
+        close: pd.DataFrame,
+        high: pd.DataFrame,
+        low: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        区间震荡突破因子（Range Breakout Position）。
+
+        计算当前收盘价在过去 window 天高低区间内的相对位置（通道位置）：
+            RangeBreakout = (Close - RollingMin(Low, window))
+                           / (RollingMax(High, window) - RollingMin(Low, window))
+
+        经济含义：
+          - = 1.0 → 当前价格处于 window 日最高点（强势突破）
+          - = 0.0 → 当前价格处于 window 日最低点（弱势跌破）
+          - = 0.5 → 处于区间中位
+          - 常用于趋势跟踪策略：值高 → 看多，值低 → 看空
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        high   : 最高价矩阵 (T × N)
+        low    : 最低价矩阵 (T × N)
+        window : 区间计算回看窗口（天数）
+
+        Returns
+        -------
+        pd.DataFrame : 区间位置 (T × N)，值域 [0, 1]，
+                       区间宽度接近 0 时返回 NaN
+        """
+        rol_max = high.rolling(window=window, min_periods=window).max()
+        rol_min = low.rolling(window=window, min_periods=window).min()
+        range_  = rol_max - rol_min
+        range_[range_ < 1e-10] = np.nan
+        return (close - rol_min) / range_
+
+    # ==================================================================
+    # 技术指标 (Technical Indicators)
+    # ==================================================================
+
+    @staticmethod
+    def RSI(close: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+        """
+        相对强弱指标（RSI，Relative Strength Index）。
+
+        使用 Wilder 平滑法（等价于 EWM，span = 2×window - 1）计算 RSI：
+            1. 计算日收益差分：delta = close.diff()
+            2. 分离上涨（gain）与下跌（loss）
+            3. Wilder 平滑：AvgGain = EWM(gain, span=2w-1)
+                           AvgLoss = EWM(loss, span=2w-1)
+            4. RS = AvgGain / AvgLoss
+            5. RSI = 100 - 100 / (1 + RS)
+
+        经济含义：
+          - RSI > 70 → 超买区间，注意回调风险
+          - RSI < 30 → 超卖区间，注意反弹机会
+          - 与标准 SMA 版 RSI 不同，Wilder EWM 更平滑，避免突变
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        window : RSI 计算周期，标准值为 14 天
+
+        Returns
+        -------
+        pd.DataFrame : RSI 值 (T × N)，值域 [0, 100]
+
+        Notes
+        -----
+        全向量化实现（基于 pandas ewm），无显式股票循环。
+        span = 2×window - 1 是 Wilder 平滑与 EWM 的等价变换关系。
+        """
+        delta  = close.diff()
+        gain   = delta.clip(lower=0.0)          # 上涨部分，跌则为 0
+        loss   = (-delta).clip(lower=0.0)       # 下跌绝对值，涨则为 0
+        span   = 2 * window - 1                 # Wilder 平滑等价 EWM span
+        avg_gain = gain.ewm(span=span, min_periods=window, adjust=False).mean()
+        avg_loss = loss.ewm(span=span, min_periods=window, adjust=False).mean()
+        rs       = avg_gain / avg_loss.replace(0, np.nan)
+        rsi      = 100.0 - 100.0 / (1.0 + rs)
+        return rsi
+
+    @staticmethod
+    def KDJ(
+        close: pd.DataFrame,
+        high: pd.DataFrame,
+        low: pd.DataFrame,
+        n: int = 9,
+        m1: int = 3,
+        m2: int = 3,
+    ) -> pd.DataFrame:
+        """
+        KDJ 随机指标——返回 K 值（最常用于因子构建）。
+
+        计算步骤：
+            1. RSV（原始随机值）：
+               RSV = (Close - Lowest_Low(n)) / (Highest_High(n) - Lowest_Low(n)) × 100
+            2. K 值（K线）：K = EWM(RSV, span=2×m1-1)
+               （等价于 Wilder 平滑：K = 2/3×K(prev) + 1/3×RSV，当 m1=3 时）
+            3. D 值（信号线）：D = EWM(K, span=2×m2-1)  [未返回]
+            4. J 值（背离）  ：J = 3×K - 2×D            [未返回]
+
+        经济含义（K 值）：
+          - K > 80 → 超买区间，趋势可能减弱
+          - K < 20 → 超卖区间，存在反弹机会
+          - K 线上穿 D 线 → 金叉，买入信号
+          - K 线下穿 D 线 → 死叉，卖出信号
+
+        Parameters
+        ----------
+        close : 收盘价矩阵 (T × N)
+        high  : 最高价矩阵 (T × N)
+        low   : 最低价矩阵 (T × N)
+        n     : RSV 计算的回看天数，标准值 9
+        m1    : K 值的 EWM 周期，标准值 3
+        m2    : D 值的 EWM 周期（内部计算用），标准值 3
+
+        Returns
+        -------
+        pd.DataFrame : K 值 (T × N)，值域 [0, 100]
+
+        Notes
+        -----
+        全向量化实现，基于 pandas rolling + ewm，无显式股票循环。
+        若需 D/J 值，可在外部调用：
+            D = KDJ_K.ewm(span=2*m2-1, adjust=False).mean()
+            J = 3 * KDJ_K - 2 * D
+        """
+        # 1. 计算 n 日最高价/最低价
+        highest_high = high.rolling(window=n, min_periods=n).max()
+        lowest_low   = low.rolling(window=n, min_periods=n).min()
+
+        # 2. RSV：当前收盘在 n 日高低区间内的相对位置 × 100
+        range_ = highest_high - lowest_low
+        range_[range_ < 1e-10] = np.nan
+        rsv = (close - lowest_low) / range_ * 100.0
+
+        # 3. K 值：对 RSV 做 Wilder EWM 平滑（span = 2×m1 - 1）
+        k_value = rsv.ewm(span=2 * m1 - 1, min_periods=n, adjust=False).mean()
+        return k_value
+
+    @staticmethod
+    def MACD(
+        close: pd.DataFrame,
+        fast: int = 12,
+        slow: int = 26,
+        signal: int = 9,
+    ) -> pd.DataFrame:
+        """
+        MACD 柱状图因子（Moving Average Convergence/Divergence Histogram）。
+
+        计算步骤：
+            1. EMA_fast  = EMA(close, fast)     [快线，如 EMA(12)]
+            2. EMA_slow  = EMA(close, slow)     [慢线，如 EMA(26)]
+            3. MACD 线   = EMA_fast - EMA_slow  [差离值]
+            4. Signal 线 = EMA(MACD 线, signal) [信号线]
+            5. MACD 柱   = MACD 线 - Signal 线  [返回值，即 Histogram]
+
+        经济含义（柱状图）：
+          - 柱 > 0 → 快线在慢线上方，多头占优
+          - 柱 < 0 → 快线在慢线下方，空头占优
+          - 柱由负转正（零轴上穿）→ 金叉信号
+          - 柱由正转负（零轴下穿）→ 死叉信号
+          - 柱绝对值收缩 → 趋势减弱
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        fast   : 快速 EMA 周期，标准值 12
+        slow   : 慢速 EMA 周期，标准值 26
+        signal : 信号线 EMA 周期，标准值 9
+
+        Returns
+        -------
+        pd.DataFrame : MACD 柱状图（Histogram） (T × N)，值域无界
+                       正值表示上涨动能强，负值表示下跌动能强
+
+        Notes
+        -----
+        全向量化实现（三次 ewm），无显式股票循环。
+        若需 MACD 线或 Signal 线，可分步计算：
+            macd_line   = close.ewm(span=fast).mean() - close.ewm(span=slow).mean()
+            signal_line = macd_line.ewm(span=signal).mean()
+        """
+        ema_fast   = close.ewm(span=fast,   min_periods=fast,   adjust=False).mean()
+        ema_slow   = close.ewm(span=slow,   min_periods=slow,   adjust=False).mean()
+        macd_line  = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+        histogram  = macd_line - signal_line
+        return histogram
