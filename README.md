@@ -2,6 +2,8 @@
 
 > 工业级因子研发与回测框架 · 仿照 WorldQuant 工作流
 
+**v2.0.0 新特性** 🚀 新增 13 个预构建算子（时序/量价/动量/技术指标）+ `fusion` 多因子融合模块（统计融合 / 机器学习融合），支持一键输出 `BacktestResult`。
+
 ---
 
 ## 目录
@@ -13,13 +15,21 @@
 - [模块详解](#模块详解)
   - [MockDataGenerator — 模拟数据生成器](#1-mockdatagenerator--模拟数据生成器)
   - [AlphaOps — 算子库](#2-alphaops--算子库)
-    - [时序类算子](#时序类-time-series)
-    - [截面类算子](#截面类-cross-sectional)
-    - [特殊类算子](#特殊类-special)
+    - [时序类算子 (v1)](#时序类-time-series)
+    - [截面类算子 (v1)](#截面类-cross-sectional)
+    - [特殊类算子 (v1)](#特殊类-special)
+    - [🆕 时序统计算子 (v2)](#-时序统计算子-v2)
+    - [🆕 量价因子算子 (v2)](#-量价因子算子-v2)
+    - [🆕 动量因子算子 (v2)](#-动量因子算子-v2)
+    - [🆕 技术指标算子 (v2)](#-技术指标算子-v2)
   - [VectorEngine — 回测引擎](#3-vectorengine--回测引擎)
   - [BacktestResult — 回测结果对象](#4-backtestresult--回测结果对象)
   - [Performance — 绩效指标计算](#5-performance--绩效指标计算)
   - [Report — 可视化报告](#6-report--可视化报告)
+  - [🆕 Fusion — 多因子融合框架 (v2)](#7-fusion--多因子融合框架-v2)
+    - [Labeler — 标签生成器](#71-labeler--标签生成器)
+    - [StatisticalCombiner — 统计融合](#72-statisticalcombiner--统计融合)
+    - [MLCombiner — 机器学习融合](#73-mlcombiner--机器学习融合)
 - [指标说明](#指标说明)
 - [使用真实数据](#使用真实数据)
 - [因子构造示例集](#因子构造示例集)
@@ -67,18 +77,23 @@ result.plot()            # 生成 6 子图分析报告
 
 ```
 quant_alpha_engine/
-├── __init__.py                    # 统一导出，一行导入所有模块
+├── __init__.py                    # 统一导出，一行导入所有模块（v2.0.0）
 ├── data/
 │   └── mock_generator.py          # 模拟数据生成器
 ├── ops/
-│   └── alpha_ops.py               # 算子库（13个算子）
+│   └── alpha_ops.py               # 算子库（v1: 13个 + v2: 13个新算子）
 ├── backtest/
 │   ├── performance.py             # 绩效指标计算
 │   └── vector_engine.py           # 矩阵式净值回测引擎
+├── fusion/                        # 🆕 v2.0 多因子融合框架
+│   ├── __init__.py                # 导出 Labeler / StatisticalCombiner / MLCombiner
+│   ├── labeler.py                 # 前向收益率标签生成器
+│   └── combiner.py                # 统计融合 + ML 融合实现
 └── visualization/
-    └── report.py                  # Matplotlib 6子图报告
+    └── report.py                  # Matplotlib 6子图报告（支持中文字体自动检测）
 
-QuantAlpha_Demo.ipynb              # Jupyter 完整演示（推荐入口）
+QuantAlpha_Demo.ipynb              # v1 Jupyter 演示
+QuantAlpha_Demo_V2.ipynb           # 🆕 v2 Jupyter 演示（推荐入口，含融合框架）
 demo.py                            # Python 脚本版演示
 requirements.txt                   # 依赖列表
 ```
@@ -87,15 +102,21 @@ requirements.txt                   # 依赖列表
 
 ## 快速开始
 
-**方式一（推荐）：直接打开 Jupyter Notebook**
+**方式一（推荐）：直接打开 V2 Jupyter Notebook**
+
+```bash
+jupyter notebook QuantAlpha_Demo_V2.ipynb
+```
+
+包含所有 v2.0 新特性演示（13 个新算子 + 多因子融合完整流程）。
+
+**方式二：打开 V1 Jupyter Notebook（基础功能）**
 
 ```bash
 jupyter notebook QuantAlpha_Demo.ipynb
 ```
 
-按顺序执行各单元格，即可看到完整演示。
-
-**方式二：运行 Python 脚本**
+**方式三：运行 Python 脚本**
 
 ```bash
 python demo.py
@@ -115,9 +136,16 @@ pip install -r requirements.txt
 | pandas | 2.0 | DataFrame 核心操作 |
 | matplotlib | 3.7 | 图表绘制 |
 | seaborn | 0.12 | 热力图（可选，无则降级） |
-| scipy | 1.10 | KDE、正态拟合、OLS |
+| scipy | 1.10 | KDE、正态拟合、OLS、min-variance 优化 |
+| **scikit-learn** | **1.3** | **🆕 MLCombiner 机器学习融合（必选）** |
 
-> **注意**：seaborn 为可选依赖。若未安装，月度热力图将使用 matplotlib 的 `imshow` 替代，功能不受影响。
+> **可选依赖：** 若需使用 `MLCombiner(model_type='xgboost')`，额外安装：
+> ```bash
+> pip install xgboost>=1.7.0
+> ```
+> 未安装时自动降级为 `random_forest`，不影响其他功能。
+
+> **中文字体：** `result.plot()` 会自动检测系统中的 CJK 字体（微软雅黑、SimHei、PingFang SC 等）。若检测不到，中文标签将显示为方块，不影响数值展示。
 
 ---
 
@@ -560,6 +588,308 @@ print(factor_neut.mean(axis=1).mean())   # ≈ 0
 
 ---
 
+### 🆕 时序统计算子 (v2)
+
+v2.0 新增 4 个时序统计算子，用于捕捉价格/收益序列的**高阶矩**和**自相关结构**。
+
+---
+
+##### `Ts_Skew(df, window)` — 滚动偏度
+
+```python
+result = op.Ts_Skew(df, window)
+```
+
+计算过去 `window` 天的三阶标准矩（偏度）。正偏度表示右尾厚（偶有大涨），负偏度表示左尾厚（偶有大跌）。
+
+| 参数 | 说明 |
+|------|------|
+| `window` | 滚动窗口大小（天数），建议 ≥ 10 |
+
+**返回值域：** (-∞, +∞)，典型值在 [-3, 3] 之间。
+
+```python
+daily_ret = data.close.pct_change()
+# 滚动偏度（负偏度 → 尾部风险大 → 低配）
+factor_skew = op.Rank(-op.Ts_Skew(daily_ret, 20))
+```
+
+---
+
+##### `Ts_Kurt(df, window)` — 滚动峰度（超额）
+
+```python
+result = op.Ts_Kurt(df, window)
+```
+
+计算过去 `window` 天的超额峰度（四阶矩 - 3）。正值表示尖峰厚尾，负值表示扁平薄尾。
+
+```python
+# 高峰度意味着极端收益出现频率更高（更危险）
+factor_kurt = op.Rank(-op.Ts_Kurt(daily_ret, 20))
+```
+
+---
+
+##### `Ts_Autocorr(df, lag, window)` — 滚动自相关系数
+
+```python
+result = op.Ts_Autocorr(df, lag, window)   # 返回值域 [-1, 1]
+```
+
+计算当前值与 `lag` 天前的值在 `window` 窗口内的滚动 Pearson 相关系数。
+
+| 参数 | 说明 |
+|------|------|
+| `lag` | 滞后阶数 |
+| `window` | 滚动窗口大小 |
+
+```python
+# 1阶自相关系数（>0 趋势，<0 反转）
+autocorr1 = op.Ts_Autocorr(daily_ret, lag=1, window=20)
+# 用自相关做均值回归信号：负自相关 → 反转机会
+factor_mean_rev = op.Rank(-autocorr1)
+```
+
+---
+
+##### `Ts_Hurst(df, window)` — 赫斯特指数（R/S 分析）
+
+```python
+result = op.Ts_Hurst(df, window)   # 返回值域约 [0, 1]
+```
+
+通过 R/S 分析（极差/标准差）估计赫斯特指数：
+- **H > 0.5**：趋势性（持续性，动量信号有效）
+- **H < 0.5**：均值回归（反持续性，反转信号有效）
+- **H ≈ 0.5**：随机游走
+
+```python
+hurst = op.Ts_Hurst(data.close.pct_change(), window=30)
+# 趋势股（H 高）做动量，均值回归股（H 低）做反转
+```
+
+> ⚠️ `Ts_Hurst` 使用 `rolling.apply`，对大矩阵较慢，建议 `window` 在 20~60 之间。
+
+---
+
+### 🆕 量价因子算子 (v2)
+
+v2.0 新增 3 个量价融合算子，捕捉**成交量与价格**的微观结构关系。
+
+---
+
+##### `VWAP(close, volume, window)` — 成交量加权均价
+
+```python
+result = op.VWAP(close, volume, window)
+```
+
+计算过去 `window` 天的成交量加权均价：`Σ(P × V) / ΣV`。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `close` | DataFrame | 收盘价矩阵 |
+| `volume` | DataFrame | 成交量矩阵 |
+| `window` | int | 滚动窗口大小 |
+
+**返回：** 与 `close` 同形状，单位与价格相同。
+
+```python
+vwap = op.VWAP(data.close, data.volume, window=10)
+# 价格高于 VWAP → 强势；低于 VWAP → 弱势
+price_vs_vwap = op.Rank(data.close / vwap - 1)
+```
+
+---
+
+##### `PVDeviation(close, volume, window)` — 量价偏离度
+
+```python
+result = op.PVDeviation(close, volume, window)
+```
+
+计算当前价格相对 VWAP 的偏离程度（标准化）：`(close - VWAP) / rolling_std(close, window)`。
+
+值为正表示价格显著高于 VWAP（做多偏贵），值为负表示价格显著低于 VWAP（潜在低估）。
+
+```python
+pv_dev = op.PVDeviation(data.close, data.volume, window=10)
+# 负偏离（价格低于 VWAP）→ 均值回归买入信号
+factor_pvdev = op.Rank(-pv_dev)
+```
+
+---
+
+##### `Amihud(close, volume, window)` — Amihud 非流动性指标
+
+```python
+result = op.Amihud(close, volume, window)
+```
+
+Amihud（2002）提出的非流动性度量：`mean(|日收益率| / 日成交量)`，值越大表示单位成交量对价格的冲击越大（流动性越差）。
+
+```python
+amihud = op.Amihud(data.close, data.volume, window=20)
+# 高流动性股票（Amihud 低）通常更受机构偏好
+factor_liq = op.Rank(-amihud)
+```
+
+---
+
+### 🆕 动量因子算子 (v2)
+
+v2.0 新增 3 个动量因子算子，提供比简单价格动量更精细的信号。
+
+---
+
+##### `RiskAdjMomentum(close, window, vol_window)` — 风险调整动量
+
+```python
+result = op.RiskAdjMomentum(close, window=20, vol_window=20)
+```
+
+风险调整后的动量因子：`N日累计收益率 / N日滚动波动率`，等价于动量信号的夏普比率。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `window` | 20 | 动量计算周期（天数） |
+| `vol_window` | 20 | 波动率计算窗口（天数）|
+
+```python
+# 高夏普动量：不仅涨了，而且涨得平稳
+factor_ram = op.Rank(op.RiskAdjMomentum(data.close, window=20, vol_window=20))
+```
+
+---
+
+##### `PricePathQuality(close, window)` — 价格路径质量
+
+```python
+result = op.PricePathQuality(close, window)   # 返回值域 [-1, 1]
+```
+
+衡量过去 `window` 天价格走势的**单调性与线性度**：
+`|Spearman(t, x)| × Pearson(t, x)²`
+
+- 值接近 1：价格单调线性上涨（高质量趋势）
+- 值接近 0：价格震荡无方向
+- 负值：单调下跌
+
+```python
+# 路径质量高的上涨 → 强趋势信号
+ppq = op.PricePathQuality(data.close, window=20)
+factor_trend = op.Rank(ppq)
+```
+
+---
+
+##### `RangeBreakout(close, high, low, window)` — 区间突破位置
+
+```python
+result = op.RangeBreakout(close, high, low, window)   # 返回值域 [0, 1]
+```
+
+当前收盘价在过去 `window` 天高低区间中的位置：
+`(close - rolling_min(low)) / (rolling_max(high) - rolling_min(low))`
+
+- 值接近 1：接近历史高点（突破信号）
+- 值接近 0：接近历史低点（超卖信号）
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `close` | DataFrame | 收盘价 |
+| `high` | DataFrame | 最高价 |
+| `low` | DataFrame | 最低价 |
+
+```python
+breakout = op.RangeBreakout(data.close, data.high, data.low, window=20)
+# 价格处于区间高位 → 突破趋势
+factor_breakout = op.Rank(breakout)
+```
+
+---
+
+### 🆕 技术指标算子 (v2)
+
+v2.0 新增经典技术分析指标作为因子信号，全部向量化实现，支持任意股票矩阵。
+
+---
+
+##### `RSI(close, window=14)` — 相对强弱指数
+
+```python
+result = op.RSI(close, window=14)   # 返回值域 [0, 100]
+```
+
+Wilder 平滑 RSI：`100 - 100 / (1 + AvgGain / AvgLoss)`，使用 `ewm(span=2×window-1)` 实现。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `window` | 14 | RSI 计算周期 |
+
+- **RSI > 70**：超买（可能回调）
+- **RSI < 30**：超卖（可能反弹）
+
+```python
+rsi = op.RSI(data.close, window=14)
+# 超卖反转因子
+factor_rsi = op.Rank(-(rsi - 50).abs())  # 距离 50 越近越中性
+# 或：超卖做多
+factor_oversold = op.Rank(100 - rsi)
+```
+
+---
+
+##### `KDJ(close, high, low, n=9, m1=3, m2=3)` — KDJ 指标（K 值）
+
+```python
+result = op.KDJ(close, high, low, n=9, m1=3, m2=3)   # 返回 K 值，约 [0, 100]
+```
+
+基于 RSV（未成熟随机值）的 EWM 平滑 K 值：
+- `RSV = (close - Ln) / (Hn - Ln) × 100`
+- `K = EWM(RSV, m1)`
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `n` | 9 | 区间周期 |
+| `m1` | 3 | K 值平滑系数 |
+| `m2` | 3 | D 值平滑系数（当前仅返回 K 值）|
+
+```python
+k_val = op.KDJ(data.close, data.high, data.low, n=9)
+# K 值超买超卖
+factor_kdj = op.Rank(50 - k_val)   # 低 K 值排名靠前（超卖）
+```
+
+---
+
+##### `MACD(close, fast=12, slow=26, signal=9)` — MACD 柱状图
+
+```python
+result = op.MACD(close, fast=12, slow=26, signal=9)   # 返回 MACD 柱状图（Histogram）
+```
+
+标准 MACD：
+- `DIF = EMA(close, fast) - EMA(close, slow)`
+- `DEA = EMA(DIF, signal)`
+- **返回柱状图** = `DIF - DEA`（正值上穿为买入信号，负值下穿为卖出信号）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `fast` | 12 | 快线 EMA 周期 |
+| `slow` | 26 | 慢线 EMA 周期 |
+| `signal` | 9 | 信号线 EMA 周期 |
+
+```python
+macd_hist = op.MACD(data.close, fast=12, slow=26, signal=9)
+# 柱状图由负转正 → 趋势反转信号
+factor_macd = op.Rank(macd_hist)
+```
+
+---
+
 ### 3. VectorEngine — 回测引擎
 
 **导入路径：** `from quant_alpha_engine.backtest import VectorEngine`
@@ -945,6 +1275,280 @@ Report.plot(result, benchmark_seed=42)         # 指定基准随机种子
 
 ---
 
+### 7. Fusion — 多因子融合框架 (v2)
+
+**导入路径：**
+```python
+from quant_alpha_engine.fusion import Labeler, StatisticalCombiner, MLCombiner
+# 或通过根包直接导入：
+from quant_alpha_engine import Labeler, StatisticalCombiner, MLCombiner
+```
+
+多因子融合框架提供两种范式将多个单因子合成为一个综合因子，并直接输出标准 `BacktestResult`，无缝对接现有评估体系。
+
+**完整融合流程：**
+
+```python
+from quant_alpha_engine import MockDataGenerator, Labeler, StatisticalCombiner, MLCombiner
+from quant_alpha_engine.ops import AlphaOps as op
+
+# 1. 准备数据
+data   = MockDataGenerator(n_stocks=100, n_days=504).generate()
+close  = data.close
+
+# 2. 构造多个单因子
+f1 = op.Rank(op.Ts_Delta(close, 5))
+f2 = op.Rank(-op.Ts_Corr(data.volume, close, 10))
+f3 = op.Rank(op.MACD(close))
+
+# 3. 生成标签
+label = Labeler().set_label(target='close', horizon=5, data={'close': close})
+
+# 4. 统计融合（IC 加权）
+stat = StatisticalCombiner('ic_weighted').fit([f1, f2, f3], label)
+result = stat.evaluate(
+    [f1, f2, f3],
+    close=close, is_suspended=data.is_suspended, is_limit=data.is_limit,
+    rebalance_freq=5, top_n=30,
+)
+result.print_summary()
+result.plot()
+
+# 5. ML 融合（Ridge，防未来函数）
+ml = MLCombiner('ridge', min_train_periods=60, refit_freq=20)
+ml.fit([f1, f2, f3], label)
+result2 = ml.evaluate(
+    [f1, f2, f3],
+    close=close, is_suspended=data.is_suspended, is_limit=data.is_limit,
+    rebalance_freq=5, top_n=30,
+)
+result2.plot()
+print(ml.feature_importances_)  # 查看各因子重要性
+```
+
+---
+
+#### 7.1 Labeler — 标签生成器
+
+**导入路径：** `from quant_alpha_engine.fusion import Labeler`
+
+生成用于多因子融合的**前向收益率标签**（监督学习的目标 Y）。
+
+##### `set_label(target, horizon, method, data, custom_label)` — 生成标签
+
+```python
+label = Labeler().set_label(
+    target       = 'close',    # 目标价格字段：'close' | 'open' | 'vwap' 等
+    horizon      = 5,          # 前向天数（预测几天后的收益）
+    method       = 'return',   # 收益计算方式：'return' | 'log_return'
+    data         = {'close': close_df},  # 含目标价格矩阵的字典
+    custom_label = None,       # 用户自定义 Y (T×N DataFrame)，优先级最高
+)
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `target` | `'close'` | 价格字段名，需与 `data` 字典中的 key 对应 |
+| `horizon` | `1` | 前向天数，如 `5` 表示预测 5 日后的收益率 |
+| `method` | `'return'` | `'return'`：简单收益率 `P_{t+h}/P_t - 1`；`'log_return'`：对数收益率 |
+| `data` | `None` | 价格数据字典，如 `{'close': close_df}` |
+| `custom_label` | `None` | 若提供，直接返回该 DataFrame（跳过内置计算）|
+
+**返回：** pd.DataFrame（T × N），与输入价格矩阵形状相同，前 `horizon` 行为 NaN。
+
+```python
+# 方式一：内置标签（5日简单收益率）
+y = Labeler().set_label(target='close', horizon=5, data={'close': close})
+
+# 方式二：对数收益率标签
+y_log = Labeler().set_label(target='close', horizon=5,
+                             method='log_return', data={'close': close})
+
+# 方式三：用户自定义标签
+my_y = (close.shift(-3) / close - 1)   # 3日收益率
+y_custom = Labeler().set_label(custom_label=my_y)
+
+# 静态工厂方法（直接从价格计算）
+y_static = Labeler.from_price(close, horizon=5, method='return')
+```
+
+---
+
+#### 7.2 StatisticalCombiner — 统计融合
+
+**导入路径：** `from quant_alpha_engine.fusion import StatisticalCombiner`
+
+基于统计权重的多因子合成，支持三种权重计算方式。
+
+##### 构造参数
+
+```python
+StatisticalCombiner(method='equal')
+```
+
+| `method` | 说明 | 适用场景 |
+|----------|------|----------|
+| `'equal'` | 等权合成 | 快速基准，无需训练标签 |
+| `'ic_weighted'` | 按 IC 均值加权 | 预测力强的因子获得更高权重 |
+| `'min_variance'` | 最小方差优化（SLSQP） | 追求合成因子的稳定性 |
+
+> 所有方法在合成前自动对每个因子做 `rank(axis=1, pct=True)` 处理（消除量纲）。
+
+##### 方法
+
+```python
+combiner = StatisticalCombiner('ic_weighted')
+
+# 训练（计算权重）
+combiner.fit(factors=[f1, f2, f3], label=y)
+
+# 预测（生成合成因子 T×N）
+composite = combiner.predict([f1, f2, f3])
+
+# 一键回测评估
+result = combiner.evaluate(
+    factors      = [f1, f2, f3],
+    close        = close,
+    is_suspended = data.is_suspended,
+    is_limit     = data.is_limit,
+    rebalance_freq = 5,
+    top_n        = 30,
+    weight_method  = 'equal',
+    cost_rate      = 0.0015,
+)
+
+# 查看权重
+print(combiner.weights_)          # np.ndarray，各因子权重
+print(combiner.ic_matrix_)        # DataFrame，每日各因子 IC 值
+
+# 持久化
+combiner.save('stat_combiner.pkl')
+loaded = StatisticalCombiner.load('stat_combiner.pkl')
+```
+
+##### 使用示例
+
+```python
+from quant_alpha_engine.fusion import StatisticalCombiner
+
+# 等权合成（无需标签）
+equal = StatisticalCombiner('equal').fit([f1, f2, f3], y)
+print("等权权重:", equal.weights_)      # [0.333, 0.333, 0.333]
+
+# IC 加权（预测力强的因子权重更高）
+ic_w = StatisticalCombiner('ic_weighted').fit([f1, f2, f3], y)
+print("IC加权权重:", ic_w.weights_)    # 例：[0.45, 0.35, 0.20]
+
+# 最小方差合成（减少合成因子波动）
+min_var = StatisticalCombiner('min_variance').fit([f1, f2, f3], y)
+result = min_var.evaluate([f1, f2, f3], close, data.is_suspended, data.is_limit,
+                          rebalance_freq=5, top_n=30)
+result.print_summary()
+```
+
+---
+
+#### 7.3 MLCombiner — 机器学习融合
+
+**导入路径：** `from quant_alpha_engine.fusion import MLCombiner`
+
+使用机器学习模型学习因子与未来收益的关系，通过 **Expanding Window** 方式严格防止未来函数。
+
+##### 构造参数
+
+```python
+MLCombiner(
+    model_type         = 'ridge',   # 模型类型
+    min_train_periods  = 60,        # 最小训练期（前 N 天为 NaN，不预测）
+    refit_freq         = 20,        # 每隔 N 天重新训练一次
+    ridge_alpha        = 1.0,       # Ridge 正则化强度
+    rf_n_estimators    = 100,       # RandomForest 树的数量
+    rf_max_depth       = 5,         # RandomForest 最大深度
+    xgb_n_estimators   = 100,       # XGBoost 树的数量（需安装 xgboost）
+    xgb_max_depth      = 3,         # XGBoost 最大深度
+    xgb_learning_rate  = 0.1,       # XGBoost 学习率
+)
+```
+
+| `model_type` | 说明 | 特征重要性来源 |
+|-------------|------|--------------|
+| `'linear'` | 普通线性回归 | `\|coef_\|` 归一化 |
+| `'ridge'` | Ridge 回归（L2 正则化）| `\|coef_\|` 归一化 |
+| `'random_forest'` | 随机森林 | `feature_importances_` |
+| `'xgboost'` | XGBoost（需额外安装）| `feature_importances_`，未安装时自动降级为 `random_forest` |
+
+##### Expanding Window 防未来函数原则
+
+```
+训练期（前 min_train_periods 天）→ 输出全为 NaN
+
+Day  0 ~ 59  → 积累期，无预测
+Day 60 ~ 79  → 用 [0, 60) 训练 → 预测 [60, 80)
+Day 80 ~ 99  → 用 [0, 80) 训练 → 预测 [80, 100)
+Day 100~119  → 用 [0, 100) 训练 → 预测 [100, 120)
+...（训练集持续扩大，永不使用未来数据）
+```
+
+##### 方法
+
+```python
+ml = MLCombiner('ridge', min_train_periods=60, refit_freq=20)
+
+# 训练
+ml.fit(factors=[f1, f2, f3], label=y)
+
+# 预测（生成合成因子 T×N，前 min_train_periods 行为 NaN）
+pred = ml.predict([f1, f2, f3])
+assert pred.iloc[:60].isna().all().all()   # 严格验证无未来函数
+
+# 查看各因子重要性
+print(ml.feature_importances_)   # pd.Series，index = ['f0', 'f1', 'f2']
+
+# 一键回测评估
+result = ml.evaluate(
+    [f1, f2, f3],
+    close=close, is_suspended=data.is_suspended, is_limit=data.is_limit,
+    rebalance_freq=5, top_n=30,
+)
+result.plot()
+
+# 持久化（两种模式）
+ml.save('ml_combiner.pkl')                            # 含预测缓存（文件较大）
+ml.save('ml_combiner_lite.pkl', save_predictions=False)  # 仅模型权重（文件更小）
+loaded = MLCombiner.load('ml_combiner.pkl')
+```
+
+##### 使用示例
+
+```python
+from quant_alpha_engine.fusion import MLCombiner
+
+# Ridge 融合
+ml_ridge = MLCombiner('ridge', min_train_periods=60, refit_freq=20, ridge_alpha=1.0)
+ml_ridge.fit([f1, f2, f3], y)
+
+# 验证无未来函数
+pred = ml_ridge.predict([f1, f2, f3])
+assert pred.iloc[:60].isna().all().all()
+print(f"有效预测天数: {pred.dropna(how='all').shape[0]}")
+
+# 查看特征重要性
+print(ml_ridge.feature_importances_)
+
+# RandomForest 融合（捕捉非线性关系）
+ml_rf = MLCombiner('random_forest', min_train_periods=120, refit_freq=60,
+                   rf_n_estimators=100, rf_max_depth=5)
+ml_rf.fit([f1, f2, f3], y)
+result_rf = ml_rf.evaluate(
+    [f1, f2, f3],
+    close=close, is_suspended=data.is_suspended, is_limit=data.is_limit,
+    rebalance_freq=5, top_n=30,
+)
+result_rf.print_summary()
+```
+
+---
+
 ## 指标说明
 
 | 指标 | 计算公式 | 参考范围 | 含义 |
@@ -1062,6 +1666,12 @@ factor_mom = op.Rank(momentum)
 # 线性衰减平滑的动量
 factor_decay_mom = op.Rank(op.Decay_Linear(op.Rank(op.Ts_Delta(close, 10)), d=5))
 
+# 🆕 风险调整动量（v2）
+factor_ram = op.Rank(op.RiskAdjMomentum(close, window=20, vol_window=20))
+
+# 🆕 价格路径质量（v2）— 单调线性趋势
+factor_ppq = op.Rank(op.PricePathQuality(close, window=20))
+
 # ── 量价类 ─────────────────────────────────────────────────────────────
 
 # 量价背离（缩量上涨为正信号）
@@ -1075,11 +1685,34 @@ price_rank  = op.Ts_Rank(close, 60)
 vol_rank    = op.Ts_Rank(volume, 20)
 factor_breakout = op.Rank(price_rank + vol_rank)
 
+# 🆕 VWAP 偏离度（v2）
+factor_pvdev = op.Rank(-op.PVDeviation(close, volume, window=10))
+
+# 🆕 Amihud 流动性（v2）— 高流动性股票
+factor_liq = op.Rank(-op.Amihud(close, volume, window=20))
+
 # ── 波动率类 ────────────────────────────────────────────────────────────
 
 # 低波动因子（波动率越小越好）
 daily_ret = close.pct_change()
 factor_lowvol = op.Rank(-op.Ts_Std(daily_ret, 20))
+
+# 🆕 高阶矩因子（v2）— 低负偏度（尾部风险小）
+factor_skew = op.Rank(-op.Ts_Skew(daily_ret, 20))
+
+# ── 技术指标类 ──────────────────────────────────────────────────────────
+
+# 🆕 RSI 超卖因子（v2）
+factor_rsi = op.Rank(100 - op.RSI(close, window=14))   # RSI 越低 → 越超卖
+
+# 🆕 MACD 柱状图（v2）
+factor_macd = op.Rank(op.MACD(close, fast=12, slow=26, signal=9))
+
+# 🆕 KDJ 超卖（v2）
+factor_kdj = op.Rank(50 - op.KDJ(close, high, low, n=9))
+
+# 🆕 区间突破（v2）
+factor_rng = op.Rank(op.RangeBreakout(close, high, low, window=20))
 
 # ── 价格位置类 ──────────────────────────────────────────────────────────
 
@@ -1089,7 +1722,7 @@ low20  = op.Ts_Min(low,  20)
 wr     = (close - high20) / (high20 - low20 + 1e-8)
 factor_wr = op.Rank(-wr)   # 超卖排名靠前
 
-# ── 多因子合成 ──────────────────────────────────────────────────────────
+# ── 多因子合成（手动等权） ────────────────────────────────────────────────
 
 # 等权合成（先分别 Rank 消除量纲，再加权）
 alpha_combo = (
@@ -1097,6 +1730,27 @@ alpha_combo = (
     0.3 * op.Rank(factor_vp) +
     0.3 * op.Rank(factor_lowvol)
 )
+
+# ── 🆕 多因子融合（fusion 模块）─────────────────────────────────────────
+
+from quant_alpha_engine.fusion import Labeler, StatisticalCombiner, MLCombiner
+
+label = Labeler().set_label(target='close', horizon=5, data={'close': close})
+
+# IC 加权统计融合
+stat = StatisticalCombiner('ic_weighted').fit([factor_rev5, factor_vp, factor_rsi], label)
+result = stat.evaluate([factor_rev5, factor_vp, factor_rsi],
+                       close, data.is_suspended, data.is_limit,
+                       rebalance_freq=5, top_n=30)
+result.print_summary()
+
+# Ridge ML 融合
+ml = MLCombiner('ridge', min_train_periods=60, refit_freq=20)
+ml.fit([factor_rev5, factor_vp, factor_rsi], label)
+result2 = ml.evaluate([factor_rev5, factor_vp, factor_rsi],
+                      close, data.is_suspended, data.is_limit,
+                      rebalance_freq=5, top_n=30)
+result2.plot()
 ```
 
 ---
@@ -1183,3 +1837,77 @@ result.plot(save_path='report.png')
 ```
 
 或在 Notebook 顶部使用 `%matplotlib inline` 时，直接用 `save_path` 参数保存。
+
+---
+
+**Q: 🆕 `MLCombiner` 预测前几行全是 NaN，这是正常的吗？**
+
+A: 完全正常，这是**防未来函数**设计的核心保证。前 `min_train_periods` 行（默认60天）没有足够的历史数据来训练模型，因此输出 NaN。`VectorEngine` 会自动通过 `ffill` 填充，回测期间权重从第一个有效预测日开始建立。
+
+```python
+ml = MLCombiner('ridge', min_train_periods=60)
+ml.fit([f1, f2, f3], y)
+pred = ml.predict([f1, f2, f3])
+# 前 60 行应全为 NaN（严格验证）
+assert pred.iloc[:60].isna().all().all()
+# 第 60 行之后有有效预测
+print(f"积累期：前 {pred.isna().all(axis=1).sum()} 行")
+```
+
+---
+
+**Q: 🆕 `StatisticalCombiner` 和 `MLCombiner` 的 `evaluate()` 需要哪些参数？**
+
+A: 与 `VectorEngine` 完全一致（除了 `factor` 参数被 `factors` 列表替代）：
+
+```python
+result = combiner.evaluate(
+    factors        = [f1, f2, f3],    # 因子列表
+    close          = close_df,         # 必填
+    is_suspended   = susp_df,          # 必填
+    is_limit       = limit_df,         # 必填
+    rebalance_freq = 5,                # 可选，默认 1
+    top_n          = 30,               # 可选，默认 50
+    weight_method  = 'equal',          # 可选，默认 'equal'
+    cost_rate      = 0.0015,           # 可选，默认 0.0015
+)
+```
+
+---
+
+**Q: 🆕 如何保存和加载训练好的融合模型？**
+
+```python
+# 保存
+stat.save('my_combiner.pkl')
+ml.save('my_ml_combiner.pkl')
+ml.save('my_ml_light.pkl', save_predictions=False)  # 不含预测缓存，文件更小
+
+# 加载
+from quant_alpha_engine.fusion import StatisticalCombiner, MLCombiner
+stat2 = StatisticalCombiner.load('my_combiner.pkl')
+ml2   = MLCombiner.load('my_ml_combiner.pkl')
+
+# 验证加载成功
+assert stat2._is_fitted
+assert ml2._is_fitted
+```
+
+---
+
+**Q: 🆕 新算子（RSI、MACD、KDJ 等）的返回值是什么类型？**
+
+A: 所有新算子均返回 `pd.DataFrame`，形状与输入相同（T × N，Index=日期，Columns=股票代码），可直接作为因子传入 `VectorEngine` 或融合框架。不需要逐股票循环调用。
+
+```python
+from quant_alpha_engine.ops import AlphaOps as op
+
+# 批量计算所有股票的 RSI（T × N）
+rsi = op.RSI(close, window=14)          # DataFrame
+macd = op.MACD(close)                   # DataFrame
+hurst = op.Ts_Hurst(close.pct_change(), window=30)  # DataFrame
+
+# 直接用于回测
+factor = op.Rank(rsi)
+result = VectorEngine(factor=factor, close=close, ...).run()
+```
