@@ -164,6 +164,9 @@ class FactorCombiner(ABC):
         weight_method: str = "equal",
         cost_rate: float = 0.0015,
         initial_capital: float = 1_000_000.0,
+        delay: int = 0,
+        decay: int = 0,
+        industry=None,
     ) -> BacktestResult:
         """
         将合成因子传入 VectorEngine 进行全量回测，返回 BacktestResult。
@@ -182,6 +185,9 @@ class FactorCombiner(ABC):
         weight_method  : 'equal' 或 'factor_weighted'
         cost_rate      : 单边交易成本，默认 0.0015
         initial_capital: 初始资金（仅展示用），默认 1,000,000
+        delay          : 因子延迟天数，默认 0（融合器输出通常已处理好时序，无需再延迟）
+        decay          : 线性衰减窗口，默认 0（不衰减）
+        industry       : 行业映射，默认 None（不做中性化）
 
         Returns
         -------
@@ -205,6 +211,9 @@ class FactorCombiner(ABC):
             weight_method=weight_method,
             cost_rate=cost_rate,
             initial_capital=initial_capital,
+            delay=delay,
+            decay=decay,
+            industry=industry,
         )
         return engine.run()
 

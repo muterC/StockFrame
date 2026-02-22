@@ -3,27 +3,43 @@ VectorEngine — 矩阵式净值回测引擎
 ====================================
 基于因子权重矩阵的向量化回测，严格防止未来函数（Look-ahead bias）。
 
+时序语义（delay 参数的精确定义）
+--------------------------------
+  delay=d 表示：用 T-d 日的因子值预测 T 日的收益。
+
+  以 delay=1 为例（标准配置）：
+    - factor[T-1]  →  构建 T 日持仓权重
+    - ret[T]       =  close[T] / close[T-1] - 1（T 日当日收益）
+    - 含义：T-1 日收盘计算因子 → T 日开盘执行交易 → 赚 T 日收益
+
+  以 delay=0 为例（仅回测研究用，实盘不可用）：
+    - factor[T]    →  构建 T 日持仓权重
+    - ret[T]       =  close[T] / close[T-1] - 1（T 日当日收益）
+    - 含义：因子与收益处于同一天，存在 look-ahead bias
+
 回测逻辑
 --------
 1. 数据对齐（factor / close / is_suspended / is_limit 取交集）
-2. 计算前向 1 日收益率（T 日因子 → T+1 日收益）
-3. 按调仓频率生成持仓权重矩阵（Top-N 等权 or 因子加权）
-4. 过滤停牌/涨跌停股票（权重置零并重新归一化）
-5. 扣除单边交易成本（手续费 + 滑点）
-6. 输出净值序列及全量绩效指标
+2. 因子预处理（delay → decay → 行业中性化）
+3. 计算当日收益率 ret[T] = close[T] / close[T-1] - 1
+4. 按调仓频率生成持仓权重矩阵（Top-N 等权 or 因子加权）
+5. 过滤停牌/涨跌停股票（权重置零并重新归一化）
+6. 扣除单边交易成本（手续费 + 滑点）
+7. 输出净值序列及全量绩效指标
 
 防止未来函数原则
 --------------
-- 权重使用当日收盘后的因子值生成
-- 收益用 close.shift(-1)/close - 1（即明日收益）
-- 持仓收益计算时用 weights.shift(1)（昨日权重 × 今日收益）
+- delay=1（默认）：factor 经 Ts_Delay(1) 后，T 行因子值来自 T-1 日
+- 权重 weights[T] 由 factor[T-1] 构建（delay=1 保证）
+- 收益 ret[T] = close[T]/close[T-1] - 1（当日收益，与权重同行对齐）
+- 组合收益：port_ret[T] = sum_i(weights[T,i] * ret[T,i])
 """
 
 from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional, Literal
+from typing import Optional, Literal, Union
 
 import numpy as np
 import pandas as pd
@@ -97,6 +113,19 @@ class VectorEngine:
     weight_method   : 权重计算方式，'equal'（等权）或 'factor_weighted'（因子值加权）
     cost_rate       : 单边交易成本（手续费+滑点），默认 0.0015（0.15%）
     initial_capital : 初始资金（仅用于展示，不影响收益率计算）
+    delay           : 因子延迟天数，默认 1。
+                      delay=d 表示用 T-d 日因子预测 T 日收益。
+                      delay=1（推荐）：T-1 日因子 → T 日建仓 → 赚 T 日收益，严格无未来函数。
+                      delay=0：T 日因子预测 T 日收益，存在 look-ahead bias，仅供研究。
+    decay           : 线性衰减窗口大小，默认 0（不衰减）；>0 时对因子做 Decay_Linear
+    industry        : 行业映射（pd.Series 或 pd.DataFrame），用于因子行业中性化；
+                      None（默认）表示跳过中性化
+
+    预处理执行顺序（均在数据对齐之后、权重构建之前）
+    --------------------------------------------------
+    1. delay  ：Ts_Delay(factor, delay)   — delay=1 使 factor[T] 变为原 factor[T-1]
+    2. decay  ：Decay_Linear(factor, decay)
+    3. 行业中性化：Neutralize(factor, industry)
 
     Examples
     --------
@@ -107,6 +136,9 @@ class VectorEngine:
     ...     is_limit=limit_df,
     ...     rebalance_freq=5,
     ...     top_n=30,
+    ...     delay=1,
+    ...     decay=5,
+    ...     industry=industry_series,
     ... )
     >>> result = engine.run()
     >>> result.print_summary()
@@ -124,6 +156,10 @@ class VectorEngine:
         weight_method:   Literal["equal", "factor_weighted"] = "equal",
         cost_rate:       float = 0.0015,
         initial_capital: float = 1_000_000.0,
+        # ── 因子预处理参数 ─────────────────────────────────────
+        delay:    int                                        = 1,
+        decay:    int                                        = 0,
+        industry: Optional[Union[pd.Series, pd.DataFrame]]  = None,
     ):
         self.factor         = factor
         self.close          = close
@@ -134,6 +170,9 @@ class VectorEngine:
         self.weight_method  = weight_method
         self.cost_rate      = cost_rate
         self.initial_capital = initial_capital
+        self.delay          = delay
+        self.decay          = decay
+        self.industry       = industry
 
     # ------------------------------------------------------------------
     # 主入口
@@ -151,9 +190,18 @@ class VectorEngine:
         factor, close, is_suspended, is_limit = self._align_data()
 
         print(f"[VectorEngine] 数据规模：{len(factor)} 个交易日 × {factor.shape[1]} 只股票")
+        print(f"[VectorEngine] 预处理参数：delay={self.delay}, decay={self.decay}, "
+              f"neutralize={'是' if self.industry is not None else '否'}")
 
-        # Step 1: 计算前向 1 日收益率（T 日价格 → T+1 日实际收益）
-        fwd_ret = (close.shift(-1) / close - 1)   # T×N，最后一行全 NaN
+        # Step 0: 因子预处理（delay → decay → 行业中性化）
+        # delay=1 后：factor 矩阵第 T 行 = 原始 T-1 日的因子值
+        factor = self._preprocess_factor(factor)
+
+        # Step 1: 计算当日收益率
+        # ret[T] = close[T] / close[T-1] - 1
+        # 与 delay=1 后的 factor[T]（原 T-1 日因子）同行对齐：
+        #   factor[T] 预测 ret[T]，即 T-1 日因子 → T 日收益，无未来函数
+        ret = close / close.shift(1) - 1   # T×N，第 0 行全 NaN
 
         # Step 2: 构建原始权重矩阵（调仓日满足条件的股票平等或加权持仓）
         print("[VectorEngine] 构建持仓权重矩阵...")
@@ -170,16 +218,11 @@ class VectorEngine:
         cost_series = turnover * self.cost_rate
 
         # Step 6: 计算组合日收益率
-        # 严格防未来函数：今日持仓（weights）已知，明日收益（fwd_ret.shift(1)）
-        # 等价写法：昨日建仓的权重乘以今日实际收益
-        # port_ret_t = sum_i(w_{t-1,i} * r_{t,i})
-        # 其中 r_{t,i} = close_{t,i}/close_{t-1,i} - 1 = fwd_ret_{t-1,i}
-        # 所以：port_ret_t = (weights.shift(1) * fwd_ret.shift(1)).sum(axis=1)
-        # 但习惯上用 fwd_ret 直接表示：
-        # w_t 在 t 日收盘后建仓，t+1 日获得 fwd_ret_t 的收益
-        # port_ret_{t+1} = (w_t * fwd_ret_t).sum()
-        # 即：port_gross = (weights * fwd_ret).sum(axis=1).shift(1)
-        gross_ret = (weights * fwd_ret).sum(axis=1).shift(1)
+        # weights[T] 由 factor[T]（经 delay=1 后即原 T-1 日因子）构建
+        # ret[T] = close[T]/close[T-1] - 1
+        # port_ret[T] = sum_i( weights[T,i] * ret[T,i] )
+        # 两者同行直接相乘，无需额外 shift，语义清晰
+        gross_ret = (weights * ret).sum(axis=1)
         gross_ret.iloc[0] = 0.0
 
         net_ret = gross_ret - cost_series
@@ -193,8 +236,9 @@ class VectorEngine:
 
         # Step 8: IC 序列
         print("[VectorEngine] 计算 IC 序列...")
-        # IC 计算：当日因子 vs 当日前向收益（对齐到同一 index）
-        ic_series = Performance.calc_ic_series(factor, fwd_ret)
+        # IC 计算：factor[T]（delay 后，即 T-1 日因子）vs ret[T]（T 日当日收益）
+        # 同行对齐，直接计算截面 Rank IC
+        ic_series = Performance.calc_ic_series(factor, ret)
 
         # Step 9: 汇总指标
         print("[VectorEngine] 汇总绩效指标...")
@@ -203,7 +247,7 @@ class VectorEngine:
             daily_returns   = net_ret,
             weights         = weights,
             factor          = factor,
-            forward_returns = fwd_ret,
+            forward_returns = ret,
             cost_series     = cost_series,
         )
 
@@ -220,7 +264,7 @@ class VectorEngine:
             weights         = weights,
             turnover        = turnover,
             ic_series       = ic_series,
-            forward_returns = fwd_ret,
+            forward_returns = ret,
             factor          = factor,
             metrics         = metrics,
             rebalance_dates = rebalance_dates,
@@ -229,6 +273,40 @@ class VectorEngine:
     # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
+
+    def _preprocess_factor(self, factor: pd.DataFrame) -> pd.DataFrame:
+        """
+        按顺序执行三步因子预处理（每步均可通过参数跳过）：
+
+        1. delay  ：Ts_Delay(factor, self.delay)
+                    delay=1 → factor 第 T 行变为原始 T-1 日的因子值
+                    使得 factor[T] 与 ret[T] 对齐时，语义为"T-1日因子预测T日收益"
+        2. decay  ：Decay_Linear(factor, self.decay) — 线性衰减，decay=0 跳过
+        3. 中性化  ：Neutralize(factor, self.industry) — 行业中性化，industry=None 跳过
+
+        Parameters
+        ----------
+        factor : 已对齐的因子矩阵 (T × N)
+
+        Returns
+        -------
+        pd.DataFrame : 预处理后的因子矩阵，形状不变
+        """
+        from quant_alpha_engine.ops.alpha_ops import AlphaOps
+
+        # Step 1: 延迟（delay=1：T行因子值 ← 原T-1日的值，与ret[T]对齐后无未来函数）
+        if self.delay > 0:
+            factor = AlphaOps.Ts_Delay(factor, self.delay)
+
+        # Step 2: 线性衰减（decay=0 跳过）
+        if self.decay > 0:
+            factor = AlphaOps.Decay_Linear(factor, self.decay)
+
+        # Step 3: 行业中性化（industry=None 跳过）
+        if self.industry is not None:
+            factor = AlphaOps.Neutralize(factor, self.industry)
+
+        return factor
 
     def _align_data(self):
         """
