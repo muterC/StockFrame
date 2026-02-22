@@ -18,7 +18,7 @@ AlphaOps — QuantAlpha_Engine 算子库
     Decay_Linear, Neutralize
 
 量价因子 (Price-Volume)
-    VWAP, PVDeviation, Amihud
+    VWAP, VWAP_Bias, PVDeviation, Amihud
 
 动量因子 (Momentum)
     RiskAdjMomentum, PricePathQuality, RangeBreakout
@@ -514,6 +514,43 @@ class AlphaOps:
             / volume.rolling(window=window, min_periods=window).sum()
         )
         return vwap
+
+    @staticmethod
+    def VWAP_Bias(
+        close: pd.DataFrame,
+        volume: pd.DataFrame,
+        window: int,
+    ) -> pd.DataFrame:
+        """
+        VWAP 乖离率（VWAP Bias）。
+
+        衡量当前收盘价相对滚动 VWAP 的百分比偏离程度：
+            VWAP_Bias = Close / VWAP(window) - 1
+
+        经济含义：
+          - > 0：价格高于 VWAP，多头占优（或相对超买）
+          - < 0：价格低于 VWAP，空头占优（或相对低估）
+          - 均值回归信号：极端负乖离（大幅低于 VWAP）往往预示短期反弹
+          - 趋势跟踪信号：持续正乖离的股票动量较强
+
+        与 PVDeviation 的区别：
+          - VWAP_Bias：百分比偏离（原始幅度，保留量纲）
+          - PVDeviation：除以价格标准差标准化（无量纲）
+
+        Parameters
+        ----------
+        close  : 收盘价矩阵 (T × N)
+        volume : 成交量矩阵 (T × N)，单位任意
+        window : 计算 VWAP 的滚动窗口大小
+
+        Returns
+        -------
+        pd.DataFrame : VWAP 乖离率 (T × N)，值域无界，典型范围 [-0.1, 0.1]
+                       VWAP 为 0 或 NaN 时对应位置返回 NaN
+        """
+        vwap = AlphaOps.VWAP(close, volume, window)
+        vwap[vwap.abs() < 1e-10] = np.nan   # 避免除以零
+        return close / vwap - 1.0
 
     @staticmethod
     def PVDeviation(

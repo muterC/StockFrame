@@ -703,6 +703,37 @@ price_vs_vwap = op.Rank(data.close / vwap - 1)
 
 ---
 
+##### `VWAP_Bias(close, volume, window)` — VWAP 乖离率
+
+```python
+result = op.VWAP_Bias(close, volume, window)
+```
+
+衡量当前收盘价相对滚动 VWAP 的**百分比偏离**：`Close / VWAP(window) - 1`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `close` | DataFrame | 收盘价矩阵 |
+| `volume` | DataFrame | 成交量矩阵 |
+| `window` | int | 计算 VWAP 的滚动窗口大小 |
+
+**返回值域：** 无界，典型范围 [-0.1, 0.1]（即 ±10%）。
+
+- **> 0**：价格高于 VWAP，多头占优（可能相对超买）
+- **< 0**：价格低于 VWAP，空头占优（潜在均值回归机会）
+
+> 与 `PVDeviation` 的区别：`VWAP_Bias` 保留价格量纲（百分比偏离），`PVDeviation` 用价格标准差标准化（无量纲），两者信息互补。
+
+```python
+bias = op.VWAP_Bias(data.close, data.volume, window=10)
+# 均值回归信号：大幅低于 VWAP → 短期反弹
+factor_bias_rev = op.Rank(-bias)
+# 趋势信号：持续正乖离 → 动量强
+factor_bias_mom = op.Rank(bias)
+```
+
+---
+
 ##### `PVDeviation(close, volume, window)` — 量价偏离度
 
 ```python
@@ -909,6 +940,10 @@ VectorEngine(
     weight_method   = 'equal',       # 权重方式
     cost_rate       = 0.0015,        # 单边交易成本
     initial_capital = 1_000_000.0,   # 初始资金（仅展示用）
+    # ── 内置预处理参数（v2.0 新增）────────────────────────────
+    delay           = 1,             # 因子延迟天数（0=不延迟）
+    decay           = 0,             # 线性衰减窗口（0=不衰减）
+    industry        = None,          # 行业映射，None=跳过中性化
 )
 ```
 
@@ -925,6 +960,9 @@ VectorEngine(
 | `weight_method` | str | `'equal'` | 持仓权重计算方式，见下方说明 |
 | `cost_rate` | float | 0.0015 | 单边交易成本率（手续费 + 滑点）。每次换手的买入或卖出均按此比率扣费 |
 | `initial_capital` | float | 1,000,000 | 初始资金，仅用于结果展示，不影响收益率计算 |
+| `delay` | int | **1** | 因子延迟天数（`Ts_Delay`）。`1` 表示 T 日因子在 T+1 日后生效，防止日内使用未来数据；`0` 关闭延迟 |
+| `decay` | int | 0 | 线性衰减窗口（`Decay_Linear`）。对因子做线性加权移动平均，平滑信号、降低换手率；`0` 跳过 |
+| `industry` | Series/DataFrame/None | None | 行业映射（股票 → 行业标签），传入后自动对因子做 OLS 行业中性化（`Neutralize`）；`None` 跳过 |
 
 **`weight_method` 可选值：**
 
@@ -948,6 +986,7 @@ result = engine.run()   # 执行回测，返回 BacktestResult
 ```
 
 `run()` 会自动：
+0. **因子预处理**（v2.0 新增）：按 `delay → decay → neutralize` 顺序执行内置预处理（任一参数为默认值时自动跳过对应步骤）
 1. 对齐所有输入数据（取共同日期和股票）
 2. 计算前向 1 日收益率（严格防未来函数）
 3. 在调仓日生成权重，过滤停牌/涨跌停股票
@@ -959,7 +998,7 @@ result = engine.run()   # 执行回测，返回 BacktestResult
 ```python
 from quant_alpha_engine.backtest import VectorEngine
 
-# 基础用法（每周调仓，等权持仓30只）
+# 基础用法（每周调仓，等权持仓30只，默认 delay=1 自动防未来函数）
 engine = VectorEngine(
     factor         = factor,
     close          = data.close,
@@ -969,6 +1008,7 @@ engine = VectorEngine(
     top_n          = 30,
     weight_method  = 'equal',
     cost_rate      = 0.0015,
+    # delay=1 为默认值，T日因子 → T+1日生效（保守风控）
 )
 result = engine.run()
 
@@ -984,6 +1024,21 @@ engine2 = VectorEngine(
     cost_rate      = 0.0010,   # 更低成本（机构费率）
 )
 result2 = engine2.run()
+
+# 完整预处理流水线（delay + decay + 行业中性化）
+engine3 = VectorEngine(
+    factor         = factor,
+    close          = data.close,
+    is_suspended   = data.is_suspended,
+    is_limit       = data.is_limit,
+    rebalance_freq = 5,
+    top_n          = 30,
+    cost_rate      = 0.0015,
+    delay          = 1,               # Step1: T日因子 → T+1日生效
+    decay          = 5,               # Step2: 线性衰减平滑（降换手率）
+    industry       = data.industry,   # Step3: OLS行业中性化
+)
+result3 = engine3.run()
 ```
 
 ---
