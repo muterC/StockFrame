@@ -7,7 +7,8 @@
       "Bash(python -X utf8 -c:*)",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(dir:*)"
     ]
   }
 }
