@@ -11,20 +11,26 @@
 - 数据格式：CSV 格式，日期作为索引（第一列），指标作为列
 - 元数据：完整的数据追踪和校验系统
 
+设计原则：
+- save_* 方法均为**纯覆盖写入**，不做内部合并。
+  合并/去重逻辑由上层 DataUpdater.compare_and_merge 在写入前完成。
+- load_* 方法支持可选的日期范围过滤。
+
 特性：
 - 多数据类型支持（OHLCV + 复权因子 + 财务 + 市值 + 衍生特征）
 - 结构化存储（清晰的目录组织）
-- 增量更新友好（支持数据合并）
 - 元数据管理（数据清单、更新时间、完整性校验）
 - 易于扩展（预留分钟线数据结构）
 """
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union
 from datetime import datetime
 import json
 import warnings
+
+from data_process.data_validator import DataValidator
 
 
 class DataRepository:
@@ -124,157 +130,36 @@ class DataRepository:
         self.index = self._load_index()
         self.symbols_registry = self._load_symbols_registry()
 
-    def check_duplicates(self, data: pd.DataFrame) -> Tuple[bool, pd.DataFrame]:
-        """
-        检查重复数据
-
-        Args:
-            data: 数据
-
-        Returns:
-            Tuple[bool, pd.DataFrame]: (是否有重复, 重复的行)
-        """
-        duplicates = data[data.index.duplicated(keep=False)]
-        has_duplicates = len(duplicates) > 0
-
-        return has_duplicates, duplicates
-
-
     # ==================== OHLCV数据方法 ====================
-    def validate_ohlcv(self, data: pd.DataFrame, raise_exception: bool = True) -> bool:
-        """
-        验证OHLCV数据的完整性和逻辑正确性
-
-        Args:
-            data: OHLCV数据
-            raise_exception: 是否在验证失败时抛出异常
-
-        Returns:
-            bool: 验证是否通过
-
-        Raises:
-            DataValidationException: 数据验证失败
-        """
-        errors = []
-
-        # 1. 检查必需列
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in data.columns]
-        if missing_cols:
-            errors.append(f"Missing columns: {missing_cols}")
-
-        if errors:
-            if raise_exception:
-                raise RuntimeError("; ".join(errors))
-            return False
-
-        # 2. 检查数据类型
-        for col in required_cols:
-            if not pd.api.types.is_numeric_dtype(data[col]):
-                errors.append(f"Column {col} is not numeric")
-
-        # 3. 检查缺失值
-        null_counts = data[required_cols].isnull().sum()
-        if null_counts.any():
-            errors.append(f"Null values found: {null_counts[null_counts > 0].to_dict()}")
-
-        # 4. 检查价格逻辑关系
-        # high >= low
-        invalid_high_low = (data['high'] < data['low']).sum()
-        if invalid_high_low > 0:
-            errors.append(f"Found {invalid_high_low} rows where high < low")
-
-        # high >= open
-        invalid_high_open = (data['high'] < data['open']).sum()
-        if invalid_high_open > 0:
-            errors.append(f"Found {invalid_high_open} rows where high < open")
-
-        # high >= close
-        invalid_high_close = (data['high'] < data['close']).sum()
-        if invalid_high_close > 0:
-            errors.append(f"Found {invalid_high_close} rows where high < close")
-
-        # low <= open
-        invalid_low_open = (data['low'] > data['open']).sum()
-        if invalid_low_open > 0:
-            errors.append(f"Found {invalid_low_open} rows where low > open")
-
-        # low <= close
-        invalid_low_close = (data['low'] > data['close']).sum()
-        if invalid_low_close > 0:
-            errors.append(f"Found {invalid_low_close} rows where low > close")
-
-        # 5. 检查价格和成交量是否为负
-        negative_prices = (data[['open', 'high', 'low', 'close']] < 0).any(axis=1).sum()
-        if negative_prices > 0:
-            errors.append(f"Found {negative_prices} rows with negative prices")
-
-        negative_volume = (data['volume'] < 0).sum()
-        if negative_volume > 0:
-            errors.append(f"Found {negative_volume} rows with negative volume")
-
-
-        # 汇总结果
-        if errors:
-            error_msg = "; ".join(errors)
-            if raise_exception:
-                raise RuntimeError(error_msg)
-            return False
-
-        return True
-
     def save_ohlcv_data(
         self,
         symbol: str,
         data: pd.DataFrame,
-        overwrite: bool = False
     ) -> Path:
         """
-        保存OHLCV数据到market/daily/ohlcv
+        保存OHLCV数据到market/daily/ohlcv（纯覆盖写入）。
+
+        合并逻辑由调用方（DataUpdater.compare_and_merge）在写入前完成，
+        此方法只负责验证 + 写文件。
 
         Args:
             symbol: 股票代码
             data: OHLCV数据（需包含date索引和open,high,low,close,volume列）
-            overwrite: 是否覆盖已存在的文件
 
         Returns:
-            保存的文件路径
+            保存的目录路径
         """
         if data.empty:
             raise RuntimeError("不能保存空数据")
 
-        # 验证数据完整性, 逻辑正确性，以及检查重复数据
-        if self.validate_ohlcv(data, raise_exception=False) is False or self.check_duplicates(data)[0]:
-            raise RuntimeError(f"数据验证失败")
+        # 验证数据完整性、逻辑正确性，以及检查重复数据
+        valid, errors = DataValidator.validate_ohlcv(data, raise_exception=False)
+        if not valid:
+            raise RuntimeError(f"数据验证失败: {'; '.join(errors)}")
 
-        # 保存到单个文件
         symbol_dir = self.ohlcv_dir / symbol
         symbol_dir.mkdir(exist_ok=True)
-        file_path = symbol_dir / "data.csv"
-
-        if file_path.exists() and not overwrite:
-            # 合并数据
-            old_data = pd.read_csv(file_path, index_col=0, parse_dates=True)
-
-            # 统一时区处理：移除所有时区信息，统一使用naive datetime
-            if old_data.index.tz is not None:
-                old_data.index = old_data.index.tz_localize(None)
-            if data.index.tz is not None:
-                data_to_merge = data.copy()
-                data_to_merge.index = data_to_merge.index.tz_localize(None)
-            else:
-                data_to_merge = data
-
-            merged = pd.concat([old_data, data_to_merge])
-            merged = merged[~merged.index.duplicated(keep='last')]
-            merged.sort_index(inplace=True)
-            merged.to_csv(file_path)
-        else:
-            # 新数据也移除时区
-            data_to_save = data.copy()
-            if data_to_save.index.tz is not None:
-                data_to_save.index = data_to_save.index.tz_localize(None)
-            data_to_save.to_csv(file_path)
+        self._strip_tz(data).to_csv(symbol_dir / "data.csv")
 
         # 更新元数据
         self._update_symbol_metadata(
@@ -324,89 +209,34 @@ class DataRepository:
         return data
 
     # ==================== 复权因子方法 ====================
-    def validate_adjustment_factors(self, data: pd.DataFrame, raise_exception: bool = False) -> bool:
-        """
-        验证复权因子数据
-
-        Args:
-            data: 复权因子数据
-            raise_exception: 是否在验证失败时抛出异常
-
-        Returns:
-            bool: 验证是否通过
-        """
-        errors = []
-
-        required_cols = ['qfq_factor', 'hfq_factor']
-        missing_cols = [col for col in required_cols if col not in data.columns]
-        if missing_cols:
-            errors.append(f"Missing required columns: {missing_cols}")
-
-        if not errors:
-            for col in required_cols:
-                negative_count = (data[col] < 0).sum()
-                if negative_count > 0:
-                    errors.append(f"Found {negative_count} negative values in {col}")
-
-        if errors:
-            error_msg = "; ".join(errors)
-            print(f"复权因子数据验证失败: {error_msg}")
-            if raise_exception:
-                raise RuntimeError(error_msg)
-            return False
-
-        return True
-
     def save_adjustment_factors(
         self,
         symbol: str,
         data: pd.DataFrame
     ) -> Path:
         """
-        保存复权因子到market/daily/adjustment
+        保存复权因子到market/daily/adjustment（纯覆盖写入）。
 
         Args:
             symbol: 股票代码
-            data: 复权因子数据（需包含adj_factor列）
+            data: 复权因子数据（需包含qfq_factor/hfq_factor列）
 
         Returns:
             保存的文件路径
         """
         if data.empty:
             raise RuntimeError("不能保存空数据")
-        
+
         # 验证数据完整性和逻辑正确性
-        if self.validate_adjustment_factors(data, raise_exception=False) is False or self.check_duplicates(data)[0]:
-            raise RuntimeError(f"数据验证失败")
+        valid, errors = DataValidator.validate_adjustment_factors(data, raise_exception=False)
+        if not valid:
+            raise RuntimeError(f"数据验证失败: {'; '.join(errors)}")
 
         symbol_dir = self.adjustment_dir / symbol
         symbol_dir.mkdir(exist_ok=True)
-        file_path = symbol_dir / "data.csv"
+        self._strip_tz(data).to_csv(symbol_dir / "data.csv")
 
-        if file_path.exists():
-            # 合并数据
-            old_data = pd.read_csv(file_path, index_col=0, parse_dates=True)
-
-            # 统一时区处理
-            if old_data.index.tz is not None:
-                old_data.index = old_data.index.tz_localize(None)
-            if data.index.tz is not None:
-                data_to_merge = data.copy()
-                data_to_merge.index = data_to_merge.index.tz_localize(None)
-            else:
-                data_to_merge = data
-
-            merged = pd.concat([old_data, data_to_merge])
-            merged = merged[~merged.index.duplicated(keep='last')]
-            merged.sort_index(inplace=True)
-            merged.to_csv(file_path)
-        else:
-            data_to_save = data.copy()
-            if data_to_save.index.tz is not None:
-                data_to_save.index = data_to_save.index.tz_localize(None)
-            data_to_save.to_csv(file_path)
-
-        return file_path
+        return symbol_dir / "data.csv"
 
     def load_adjustment_factors(
         self,
@@ -438,11 +268,11 @@ class DataRepository:
         data: pd.DataFrame
     ) -> Path:
         """
-        保存财务指标到fundamental/financial_indicators
+        保存财务指标到fundamental/financial_indicators（纯覆盖写入）。
 
         Args:
             symbol: 股票代码
-            data: 财务指标数据（date为索引，指标为列，如 revenue, net_profit等）
+            data: 财务指标数据（date为索引，指标为列）
 
         Returns:
             保存的文件路径
@@ -452,32 +282,9 @@ class DataRepository:
 
         symbol_dir = self.financial_dir / symbol
         symbol_dir.mkdir(exist_ok=True)
-        file_path = symbol_dir / "data.csv"
+        self._strip_tz(data).to_csv(symbol_dir / "data.csv")
 
-        if file_path.exists():
-            # 合并数据
-            old_data = pd.read_csv(file_path, index_col=0, parse_dates=True)
-
-            # 统一时区处理
-            if old_data.index.tz is not None:
-                old_data.index = old_data.index.tz_localize(None)
-            if data.index.tz is not None:
-                data_to_merge = data.copy()
-                data_to_merge.index = data_to_merge.index.tz_localize(None)
-            else:
-                data_to_merge = data
-
-            merged = pd.concat([old_data, data_to_merge])
-            merged = merged[~merged.index.duplicated(keep='last')]
-            merged.sort_index(inplace=True)
-            merged.to_csv(file_path)
-        else:
-            data_to_save = data.copy()
-            if data_to_save.index.tz is not None:
-                data_to_save.index = data_to_save.index.tz_localize(None)
-            data_to_save.to_csv(file_path)
-
-        return file_path
+        return symbol_dir / "data.csv"
 
     def load_financial_data(
         self,
@@ -511,52 +318,13 @@ class DataRepository:
         return data
 
     # ==================== 市值数据方法 ====================
-    def validate_market_value(self, data: pd.DataFrame, raise_exception: bool = False) -> bool:
-        """
-        验证市值数据
-
-        Args:
-            data: 市值数据
-            raise_exception: 是否在验证失败时抛出异常
-
-        Returns:
-            bool: 验证是否通过
-        """
-        errors = []
-
-        if 'total_market_cap' in data.columns:
-            negative_count = (data['total_market_cap'] < 0).sum()
-            if negative_count > 0:
-                errors.append(f"Found {negative_count} negative total market cap values")
-
-            huge_cap = (data['total_market_cap'] > 100000).sum()
-
-        if 'circulating_market_cap' in data.columns:
-            negative_count = (data['circulating_market_cap'] < 0).sum()
-            if negative_count > 0:
-                errors.append(f"Found {negative_count} negative circulating market cap values")
-
-        # 检查流通市值应小于等于总市值
-        if 'total_market_cap' in data.columns and 'circulating_market_cap' in data.columns:
-            invalid = (data['circulating_market_cap'] > data['total_market_cap']).sum()
-            if invalid > 0:
-                errors.append(f"Found {invalid} rows where circulating cap > total cap")
-
-        if errors:
-            error_msg = "; ".join(errors)
-            if raise_exception:
-                raise RuntimeError(error_msg)
-            return False
-
-        return True
-
     def save_market_value_data(
         self,
         symbol: str,
         data: pd.DataFrame
     ) -> Path:
         """
-        保存市值数据到fundamental/market_value
+        保存市值数据到fundamental/market_value（纯覆盖写入）。
 
         Args:
             symbol: 股票代码
@@ -567,39 +335,17 @@ class DataRepository:
         """
         if data.empty:
             raise RuntimeError("不能保存空数据")
-        
+
         # 验证数据完整性和逻辑正确性
-        if self.validate_market_value(data, raise_exception=False) is False or self.check_duplicates(data)[0]:
-            raise RuntimeError(f"数据验证失败")
+        valid, errors = DataValidator.validate_market_value(data, raise_exception=False)
+        if not valid:
+            raise RuntimeError(f"数据验证失败: {'; '.join(errors)}")
 
         symbol_dir = self.mktcap_dir / symbol
         symbol_dir.mkdir(exist_ok=True)
-        file_path = symbol_dir / "data.csv"
+        self._strip_tz(data).to_csv(symbol_dir / "data.csv")
 
-        if file_path.exists():
-            # 合并数据
-            old_data = pd.read_csv(file_path, index_col=0, parse_dates=True)
-
-            # 统一时区处理
-            if old_data.index.tz is not None:
-                old_data.index = old_data.index.tz_localize(None)
-            if data.index.tz is not None:
-                data_to_merge = data.copy()
-                data_to_merge.index = data_to_merge.index.tz_localize(None)
-            else:
-                data_to_merge = data
-
-            merged = pd.concat([old_data, data_to_merge])
-            merged = merged[~merged.index.duplicated(keep='last')]
-            merged.sort_index(inplace=True)
-            merged.to_csv(file_path)
-        else:
-            data_to_save = data.copy()
-            if data_to_save.index.tz is not None:
-                data_to_save.index = data_to_save.index.tz_localize(None)
-            data_to_save.to_csv(file_path)
-
-        return file_path
+        return symbol_dir / "data.csv"
 
     def load_market_value_data(
         self,
@@ -836,71 +582,6 @@ class DataRepository:
         symbols.sort()
         return symbols
 
-    def get_data_info(self, symbol: str, data_type: str = 'ohlcv') -> Dict:
-        """
-        获取股票数据信息
-
-        Args:
-            symbol: 股票代码
-            data_type: 数据类型
-
-        Returns:
-            数据信息字典
-        """
-        if data_type == 'ohlcv':
-            symbol_dir = self.ohlcv_dir / symbol
-            metadata_file = symbol_dir / "metadata.json"
-        else:
-            return {'symbol': symbol, 'data_type': data_type, 'available': False}
-
-        if not metadata_file.exists():
-            return {'symbol': symbol, 'data_type': data_type, 'available': False}
-
-        with open(metadata_file, 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-
-        return metadata
-
-    def get_data_coverage(self, symbol: str) -> Dict:
-        """
-        获取数据覆盖情况
-
-        Args:
-            symbol: 股票代码
-
-        Returns:
-            覆盖情况字典
-        """
-        coverage = {
-            'symbol': symbol,
-            'ohlcv': self._check_data_exists(symbol, 'ohlcv'),
-            'adjustment': self._check_data_exists(symbol, 'adjustment'),
-            'financial': self._check_data_exists(symbol, 'financial'),
-            'market_value': self._check_data_exists(symbol, 'market_value'),
-            'derived_returns': self._check_data_exists(symbol, 'derived_returns'),
-            'derived_volatility': self._check_data_exists(symbol, 'derived_volatility'),
-            'derived_momentum': self._check_data_exists(symbol, 'derived_momentum')
-        }
-        return coverage
-
-    def get_date_range(self, symbol: str, data_type: str = 'ohlcv') -> Optional[Tuple[str, str]]:
-        """
-        获取数据的日期范围
-
-        Args:
-            symbol: 股票代码
-            data_type: 数据类型
-
-        Returns:
-            (start_date, end_date) 或 None
-        """
-        info = self.get_data_info(symbol, data_type)
-
-        if not info.get('available'):
-            return None
-
-        return (info.get('start_date'), info.get('end_date'))
-
     def delete_data(self, symbol: str, data_type: str = 'ohlcv') -> bool:
         """
         删除股票数据
@@ -937,61 +618,19 @@ class DataRepository:
 
         return False
 
-    def get_summary(self) -> Dict:
-        """
-        获取数据仓库摘要
-
-        Returns:
-            摘要信息字典
-        """
-        summary = {
-            'version': '2.0',
-            'total_symbols': 0,
-            'data_types': {
-                'ohlcv': len(self.list_symbols('ohlcv')),
-                'adjustment': len(self.list_symbols('adjustment')),
-                'financial': len(self.list_symbols('financial')),
-                'market_value': len(self.list_symbols('market_value'))
-            },
-            'total_records': 0,
-            'earliest_date': None,
-            'latest_date': None
-        }
-
-        summary['total_symbols'] = summary['data_types']['ohlcv']
-
-        # 统计记录数和日期范围
-        all_dates = []
-        for symbol in self.list_symbols('ohlcv'):
-            try:
-                data = self.load_ohlcv_data(symbol)
-                summary['total_records'] += len(data)
-                all_dates.extend([data.index.min(), data.index.max()])
-            except Exception as e:
-                continue
-
-        if all_dates:
-            summary['earliest_date'] = min(all_dates).strftime('%Y-%m-%d')
-            summary['latest_date'] = max(all_dates).strftime('%Y-%m-%d')
-
-        return summary
-
-    # ==================== 兼容旧接口 ====================
-
-    def save_daily_data(self, symbol: str, data: pd.DataFrame, **kwargs) -> Path:
-        """兼容旧接口：保存日线数据"""
-        return self.save_ohlcv_data(symbol, data, **kwargs.get('overwrite', False))
-
-    def load_daily_data(
-        self,
-        symbol: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
-    ) -> pd.DataFrame:
-        """兼容旧接口：加载日线数据"""
-        return self.load_ohlcv_data(symbol, start_date, end_date)
-
     # ==================== 私有方法 ====================
+
+    @staticmethod
+    def _strip_tz(data: pd.DataFrame) -> pd.DataFrame:
+        """
+        移除 DatetimeIndex 的时区信息，返回 naive datetime 副本。
+
+        若索引已是 naive datetime，原样返回（不复制）。
+        """
+        if data.index.tz is not None:
+            data = data.copy()
+            data.index = data.index.tz_localize(None)
+        return data
 
     def _check_data_exists(self, symbol: str, data_type: str) -> bool:
         """检查数据是否存在"""
@@ -1064,21 +703,3 @@ def get_repository() -> DataRepository:
     if _default_repository is None:
         _default_repository = DataRepository()
     return _default_repository
-
-
-def save_data(symbol: str, data: pd.DataFrame, **kwargs) -> Path:
-    """快捷保存函数（兼容旧接口）"""
-    repo = get_repository()
-    return repo.save_ohlcv_data(symbol, data, **kwargs.get('overwrite', False))
-
-
-def load_data(symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    """快捷加载函数（兼容旧接口）"""
-    repo = get_repository()
-    return repo.load_ohlcv_data(symbol, start_date, end_date)
-
-
-def list_all_symbols() -> List[str]:
-    """列出所有股票（兼容旧接口）"""
-    repo = get_repository()
-    return repo.list_symbols('ohlcv')

@@ -7,6 +7,7 @@
 
 确保数据索引一致，提供最完整的数据集
 """
+import logging
 import pandas as pd
 from typing import Optional, List
 from datetime import datetime
@@ -34,6 +35,8 @@ class HybridDataProvider():
     def __init__(self):
         super().__init__()
         self.source_name = "hybrid"
+        self.logger = logging.getLogger(__name__)
+        self._trading_calendar_cache = None
 
     def get_stock_list(self) -> List[dict]:
         """
@@ -177,6 +180,32 @@ class HybridDataProvider():
 
         df = df.rename(columns=column_mapping)
         return df
+
+    def _is_trading_day(self, dt: pd.Timestamp) -> bool:
+        """
+        判断给定日期是否为 A 股交易日。
+
+        优先使用 AkShare 官方交易日历；若不可用则降级为自然工作日
+        （bdate_range，即排除周六/周日，但不排除法定节假日）。
+
+        Args:
+            dt: 待判断的日期（可带时区）
+
+        Returns:
+            True = 交易日，False = 非交易日
+        """
+        date_naive = dt.normalize().tz_localize(None) if dt.tz is not None else dt.normalize()
+        try:
+            import akshare as ak
+            cal = ak.tool_trade_date_hist_sina()
+            if isinstance(cal, pd.DataFrame):
+                trading_days = pd.to_datetime(cal.iloc[:, 0])
+            else:
+                trading_days = pd.to_datetime(cal)
+            return date_naive in trading_days.values
+        except Exception:
+            # 降级：bdate_range 只排除周末，不排除节假日
+            return len(pd.bdate_range(start=date_naive, end=date_naive)) > 0
 
     def get_latest_market_value_data(
         self,
@@ -459,24 +488,52 @@ class HybridDataProvider():
             result.index.name = 'date'
 
             if fill_latest:
-                end_date_dt = pd.to_datetime(end_date).tz_localize('Asia/Shanghai')
-                yahoo_latest = result.index[-1]
+                end_date_dt  = pd.to_datetime(end_date).tz_localize('Asia/Shanghai')
+                now_sh        = pd.Timestamp.now(tz='Asia/Shanghai')
+                today_dt      = now_sh.normalize()
+                yahoo_latest  = result.index[-1]
 
-                # 检查Yahoo是否缺少最新一天的数据
-                if yahoo_latest < end_date_dt:
-                    # 从AkShare获取当前市值快照
-                    akshare_mv = self.get_latest_market_value_data(symbol)
+                # 追加今日市值快照须同时满足三个条件：
+                #   1. end_date 恰好是今天（历史日期缺失 = 当天无交易，不补）
+                #   2. 今天是交易日（周末/法定节假日不补）
+                #   3. 当前时间已过 15:00（收盘后数据才完整；盘中快照意义不大）
+                if yahoo_latest < end_date_dt and end_date_dt == today_dt:
+                    # --- 条件2：判断今天是否为交易日 ---
+                    today_is_trading = self._is_trading_day(today_dt)
 
-                    if not akshare_mv.empty:
-                        # 设置正确的日期索引（使用end_date，而不是当前时间）
-                        latest_date = end_date_dt.normalize()
-                        akshare_mv.index = pd.DatetimeIndex([latest_date])
-                        akshare_mv.index.name = 'date'
+                    # --- 条件3：已过收盘时间 ---
+                    market_closed = now_sh.hour >= 15
 
-                        # 合并数据（追加AkShare的最新数据）
-                        result = pd.concat([result, akshare_mv])
-                        result = result[~result.index.duplicated(keep='last')]  # 去重，保留最新
-                        result.sort_index(inplace=True)
+                    if today_is_trading and market_closed:
+                        # 从AkShare获取当前市值快照
+                        akshare_mv = self.get_latest_market_value_data(symbol)
+
+                        if not akshare_mv.empty:
+                            # 合理性校验：流通市值应 <= 总市值，且均为正数
+                            total_mv = akshare_mv['total_market_cap'].iloc[0]
+                            circ_mv  = akshare_mv['circulating_market_cap'].iloc[0]
+                            mv_valid = (
+                                pd.notna(total_mv) and pd.notna(circ_mv)
+                                and total_mv > 0
+                                and circ_mv <= total_mv * 1.001   # 允许极小浮点误差
+                            )
+
+                            if mv_valid:
+                                latest_date = end_date_dt.normalize()
+                                akshare_mv.index = pd.DatetimeIndex([latest_date])
+                                akshare_mv.index.name = 'date'
+
+                                result = pd.concat([result, akshare_mv])
+                                result = result[~result.index.duplicated(keep='last')]
+                                result.sort_index(inplace=True)
+                            else:
+                                self.logger.warning(
+                                    "[%s] AkShare 市值快照数据异常（total=%.2f, circ=%.2f），跳过追加",
+                                    symbol, total_mv, circ_mv
+                                )
+                    else:
+                        reason = "非交易日" if not today_is_trading else "收盘前"
+                        self.logger.debug("[%s] 今日市值快照跳过（%s）", symbol, reason)
 
             return result
 
@@ -637,68 +694,168 @@ class HybridDataProvider():
 
     def get_adjustment_factors(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        获取复权因子（使用 AkShare）
+        获取复权因子（使用 AkShare）。
 
-        Args:
-            symbol: 股票代码
+        算法说明
+        --------
+        复权因子的正确语义：
+        - hfq_factor[t]：以**股票上市首日**为锚（= 1.0），后复权累计倍率，严格单调不降。
+        - qfq_factor[t]：以**最新交易日**为锚（≈ 1.0 附近），前复权累计倍率，
+          每次新分红后整体历史重定锚，阶梯可以下降。
 
-        Returns:
-            pd.DataFrame: 复权因子数据
+        AkShare 给出的 hfq/qfq 收盘价与不复权收盘价的比值（ch/c0, cq/c0）
+        本身就是上述绝对因子，在非除权日会因精度/口径原因产生微小噪声。
+
+        主算法（有官方除权日历时）：
+        1. 仅在**除权日**采样 ch/c0（hfq_factor）和 cq/c0（qfq_factor）。
+        2. 非除权日 forward-fill（保持前一除权日的因子值不变），
+           消除非除权日价格波动带来的噪声。
+        3. 首段（第一个除权日之前）直接取 ch/c0 / cq/c0 的均值填充
+           （此段无分红事件，比值应接近常数，取均值更稳健）。
+
+        单调性校验：
+        - hfq 严格单调不降；若出现下降，说明数据源存在异常，记录 warning。
+        - qfq 阶梯下降属正常（重定锚），但降幅超过阈值时也记录 warning。
+
+        降级算法（除权日历获取失败时）：
+        直接输出全序列的 ch/c0 和 cq/c0（绝对因子，含非除权日噪声）。
+
+        Returns
+        -------
+        pd.DataFrame，index=DatetimeIndex(tz=Asia/Shanghai)，
+        columns=['qfq_factor', 'hfq_factor']
         """
         try:
-            # 获取前复权和后复权数据，计算复权因子
-            # 通过对比不复权价格和复权价格计算因子
+            ak_start = start_date.replace('-', '')
+            ak_end   = end_date.replace('-', '')
 
             df_no_adjust = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                adjust="",  # 不复权
+                symbol=symbol, period="daily",
+                start_date=ak_start, end_date=ak_end, adjust="",
             )
             df_qfq = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                adjust="qfq",  # 前复权
+                symbol=symbol, period="daily",
+                start_date=ak_start, end_date=ak_end, adjust="qfq",
             )
             df_hfq = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                adjust="hfq",  # 后复权
+                symbol=symbol, period="daily",
+                start_date=ak_start, end_date=ak_end, adjust="hfq",
             )
 
             if df_no_adjust is None or df_no_adjust.empty:
                 return pd.DataFrame()
 
-            # 标准化列名
-            df_no_adjust = self._standardize_columns(df_no_adjust)
-            df_qfq = self._standardize_columns(df_qfq)
-            df_hfq = self._standardize_columns(df_hfq)
+            # ---- 标准化列名 ----
+            df0 = self._standardize_columns(df_no_adjust)[['date', 'close']].rename(columns={'close': 'c0'})
+            dfq = self._standardize_columns(df_qfq)[['date', 'close']].rename(columns={'close': 'cq'})
+            dfh = self._standardize_columns(df_hfq)[['date', 'close']].rename(columns={'close': 'ch'})
 
-            df0 = df_no_adjust[['date', 'close']].rename(columns={'close': 'close_noadj'})
-            dfq = df_qfq[['date', 'close']].rename(columns={'close': 'close_qfq'})
-            dfh = df_hfq[['date', 'close']].rename(columns={'close': 'close_hfq'})
-            # 先按日期全外连接（避免因子缺失漏掉某天），再按条件筛选有效价格
-            result = df0.merge(dfq, on='date', how='outer').merge(dfh, on='date', how='outer')
-            # 剔除价格非正数据
-            result = result[(result['close_noadj'] > 0) & (result['close_qfq'] > 0) & (result['close_hfq'] > 0)]
-            # 计算复权因子，如果有缺失会产生NaN
-            result['qfq_factor'] = result['close_qfq'] / result['close_noadj']
-            result['hfq_factor'] = result['close_hfq'] / result['close_noadj']
-            # 剔除离群值（非正因子）
-            result = result[(result['qfq_factor'] > 0) & (result['hfq_factor'] > 0)]
-            # 按日期排序（确保填充顺序），前向/后向填补因子缺失
-            result = result.sort_values('date')
-            result['qfq_factor'] = result['qfq_factor'].fillna(method='ffill').fillna(method='bfill')
-            result['hfq_factor'] = result['hfq_factor'].fillna(method='ffill').fillna(method='bfill')
-            # 保存需要的列
-            result = result[['date', 'qfq_factor', 'hfq_factor']]
+            m = df0.merge(dfq, on='date', how='outer').merge(dfh, on='date', how='outer')
+            m = m[(m['c0'] > 0) & (m['cq'] > 0) & (m['ch'] > 0)]
+            m = m.sort_values('date').reset_index(drop=True)
+            m['date'] = pd.to_datetime(m['date'])
 
-            result.set_index('date', inplace=True)
+            # ---- 尝试获取官方除权日历（含事件字段）----
+            use_calendar = False
+            div_lookup: dict = {}   # date_str -> {bonus, cap, cash}
+            try:
+                df_div = ak.stock_dividend_cninfo(symbol=symbol)
+                if df_div is not None and not df_div.empty and '除权日' in df_div.columns:
+                    xr_dates = set(
+                        pd.to_datetime(df_div['除权日']).dropna().dt.strftime('%Y-%m-%d').tolist()
+                    )
+                    m['date_str'] = m['date'].dt.strftime('%Y-%m-%d')
+                    m['is_xr'] = m['date_str'].isin(xr_dates)
+                    use_calendar = True
+
+                    # 构建 date_str → 分红字段的查找表（备用理论倍率用）
+                    for _, row in df_div.iterrows():
+                        try:
+                            ds = pd.to_datetime(row['除权日']).strftime('%Y-%m-%d')
+                            div_lookup[ds] = {
+                                'bonus': float(row.get('送股比例', 0) or 0),
+                                'cap':   float(row.get('转增比例', 0) or 0),
+                                'cash':  float(row.get('派息比例', 0) or 0),
+                            }
+                        except Exception:
+                            pass
+            except Exception:
+                pass  # 降级为 cummax
+
+            # ---- 构造阶梯因子 ----
+            m['raw_hfq'] = m['ch'] / m['c0']   # 绝对因子快照（含非除权日微噪声）
+            m['raw_qfq'] = m['cq'] / m['c0']
+
+            if use_calendar:
+                # ── 主算法：日历引导的 cumprod 阶梯，以上市首日绝对值定锚 ──────
+                #
+                # 核心思路：
+                #   ch/c0 是"上市首日锚定"的绝对复权因子，但受当日股价影响有微噪声。
+                #   正确做法：
+                #   1. 在除权日计算日间比值 delta（两条序列比值之比）
+                #   2. 非除权日 delta = 1.0（过滤噪声）
+                #   3. 对 delta 序列做 cumprod，得到"相对于下载首日"的因子
+                #   4. 用下载首日的 raw_hfq/raw_qfq（ch/c0, cq/c0）做绝对定锚
+                #      → factor[t] = cumprod[t] × anchor
+                #   这样既消除非除权日噪声，又保留上市首日的绝对锚定。
+                #
+                # hfq：除权日 delta > 1，结果严格单调不降。
+                # qfq：除权日 delta 可 < 1（重定锚），阶梯可下降，属正常。
+
+                m['delta_hfq'] = (m['ch'] / m['ch'].shift(1)) / (m['c0'] / m['c0'].shift(1))
+                m['delta_qfq'] = (m['cq'] / m['cq'].shift(1)) / (m['c0'] / m['c0'].shift(1))
+                m.loc[m.index[0], ['delta_hfq', 'delta_qfq']] = 1.0
+
+                # 非除权日 delta 置 1.0（过滤噪声）
+                m['step_hfq'] = m['delta_hfq'].where(m['is_xr'], 1.0)
+                m['step_qfq'] = m['delta_qfq'].where(m['is_xr'], 1.0)
+
+                # cumprod 得到"相对首日"的阶梯
+                rel_hfq = m['step_hfq'].cumprod()
+                rel_qfq = m['step_qfq'].cumprod()
+
+                # 用下载首日的绝对快照值定锚（上市首日锚）
+                anchor_hfq = m['raw_hfq'].iloc[0]
+                anchor_qfq = m['raw_qfq'].iloc[0]
+                m['hfq_factor'] = rel_hfq * anchor_hfq
+                m['qfq_factor'] = rel_qfq * anchor_qfq
+
+                # ── 单调性校验 ────────────────────────────────────────────────
+                xr_rows = m[m['is_xr']]
+                if len(xr_rows) > 1:
+                    hfq_steps = xr_rows['step_hfq']
+                    hfq_bad = hfq_steps[hfq_steps < 1.0 - 1e-6]
+                    if not hfq_bad.empty:
+                        bad_dates = m.loc[hfq_bad.index, 'date_str'].tolist()
+                        self.logger.warning(
+                            "[%s] hfq delta 在以下除权日 < 1.0（数据源异常）：%s",
+                            symbol, bad_dates,
+                        )
+                    qfq_large_drop = xr_rows['step_qfq'][xr_rows['step_qfq'] < 0.8]
+                    if not qfq_large_drop.empty:
+                        drop_dates = m.loc[qfq_large_drop.index, 'date_str'].tolist()
+                        self.logger.info(
+                            "[%s] qfq delta 在以下除权日降幅超过20%%（大额分红重定锚）：%s",
+                            symbol, drop_dates,
+                        )
+
+                self.logger.debug(
+                    "[%s] 日历算法完成，除权日 %d 个，hfq 锚=%.4f，qfq 锚=%.4f",
+                    symbol, int(m['is_xr'].sum()), anchor_hfq, anchor_qfq,
+                )
+            else:
+                # ── 降级算法：直接输出绝对因子快照（含非除权日微噪声）────────
+                self.logger.warning(
+                    "[%s] 除权日历获取失败，降级为原始比值算法（含非除权日噪声）", symbol,
+                )
+                m['hfq_factor'] = m['raw_hfq']
+                m['qfq_factor'] = m['raw_qfq']
+
+            result = m[['date', 'qfq_factor', 'hfq_factor']].set_index('date')
             result.sort_index(inplace=True)
 
-            # 确保时区一致
             if not isinstance(result.index, pd.DatetimeIndex):
                 result.index = pd.to_datetime(result.index)
-
             if result.index.tz is None:
                 result.index = result.index.tz_localize('Asia/Shanghai')
             else:
@@ -707,8 +864,7 @@ class HybridDataProvider():
             return result
 
         except Exception as e:
-            error_msg = f"Failed to get adjustment factors for {symbol}: {e}"
-            raise RuntimeError(error_msg)
+            raise RuntimeError(f"Failed to get adjustment factors for {symbol}: {e}")
 
     def select_mode(self, end_date: str, check_trading_day: bool = True) -> str:
         """
