@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "WebFetch(domain:akshare.akfamily.xyz)",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c:*)",
+      "Bash(python -X utf8 -c:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(dir:*)"
     ]
   }
 }
