@@ -840,6 +840,57 @@ factor_final = op.Neutralize(
 
 ---
 
+##### `Bollinger_Outlier_Frequency(close, period=30, k=3.5, lookback_window=60)` — 布林带极端突破频率
+
+```python
+result = op.Bollinger_Outlier_Frequency(close, period=30, k=3.5, lookback_window=60)
+# 返回值域：[0, 1]
+```
+
+**核心逻辑：**
+1. 计算 `period` 日简单移动均线（中轨 MB）与滚动标准差（std）
+2. 构建极宽布林带：上轨 = MB + k × std，下轨 = MB − k × std（默认 k=3.5，理论突破率 < 0.05%）
+3. 判断每日是否"离群"：close > 上轨 **或** close < 下轨，记为 1，否则记为 0
+4. 在 `lookback_window` 天内对离群标记求滚动均值，得到突破频率
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `close` | DataFrame | — | **必填**。收盘价矩阵 (T × N) |
+| `period` | int | 30 | 布林带均线与标准差的计算窗口（天数） |
+| `k` | float | 3.5 | 标准差倍数，值越大带越宽，突破越稀有；推荐范围 [2.0, 4.0] |
+| `lookback_window` | int | 60 | 统计突破频率的回测窗口（天数） |
+
+**返回值域：** [0, 1]，前 `period + lookback_window - 2` 行为 NaN。
+
+| 值 | 含义 |
+|----|------|
+| 0 | 过去 lookback_window 天内从未突破布林带 |
+| 0.05～0.15 | 存在间歇性价格突破，趋势性较强 |
+| > 0.2 | 频繁突破，价格行为高度异常或处于强趋势中 |
+
+> **k 值选取建议：** k=2.0（常规布林带，突破率 ~4.5%），k=2.5（突破率 ~1.2%），k=3.0（突破率 ~0.27%），k=3.5（突破率 ~0.047%，推荐用于筛选极端行情）。
+
+```python
+# 基础用法：计算布林带突破频率
+f_bof = op.Bollinger_Outlier_Frequency(data.close, period=30, k=3.5, lookback_window=60)
+
+# 截面排名后送入回测（推荐）
+factor_bof = op.Rank(f_bof)
+result = VectorEngine(
+    factor=factor_bof, close=data.close,
+    is_suspended=data.is_suspended, is_limit=data.is_limit,
+    rebalance_freq=5, top_n=30,
+).run()
+
+# 不同 k 值对比（稀有程度不同）
+f_k20 = op.Bollinger_Outlier_Frequency(data.close, k=2.0, lookback_window=60)  # 常规
+f_k35 = op.Bollinger_Outlier_Frequency(data.close, k=3.5, lookback_window=60)  # 极端（推荐）
+```
+
+> ⚠️ **NaN 处理：** 当价格在整个 `period` 窗口内完全不变（std=0，例如长期停牌后首日）时，std 自动置为 NaN，避免虚假突破信号。
+
+---
+
 ## 算子速查表
 
 | 算子 | 类别 | 版本 | 核心输入 | 返回值域 | 典型窗口 |
@@ -876,6 +927,7 @@ factor_final = op.Neutralize(
 | `PriceVarShrink` | 缩量稳价 | V3 | close, vol | [0,1] | 10/20 |
 | `PriceMeanShrink` | 缩量稳价 | V3 | close, vol | [0,1] | 10/20 |
 | `VolSpikeStablePrice` | 缩量稳价 | V3 | close, vol | [0,1] | 10/20 |
+| `Bollinger_Outlier_Frequency` | 布林带异动 | V3 | close | [0,1] | period=30, lookback=60 |
 
 ---
 

@@ -343,9 +343,24 @@ VectorEngine(
 
 #### 参数详解
 
----
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `factor` | DataFrame | — | **必填**。因子矩阵（T × N），值越大代表该股票越应该被买入 |
+| `close` | DataFrame | — | **必填**。收盘价矩阵（T × N），用于计算每日收益率 |
+| `is_suspended` | DataFrame | — | **必填**。停牌矩阵（T × N，bool）。停牌股票当日权重自动置零 |
+| `is_limit` | DataFrame | — | **必填**。涨跌停矩阵（T × N，bool）。涨跌停股票当日权重自动置零（无法成交）|
+| `rebalance_freq` | int | 1 | 调仓频率。`1`=每日调仓，`5`=每周调仓，`21`≈每月调仓。非调仓日持仓不变 |
+| `top_n` | int | 50 | 每次调仓时，按因子值排名取前 N 只股票持仓。若可交易股票不足 N 只，则取全部可交易股票 |
+| `weight_method` | str | `'equal'` | 持仓权重计算方式，见下方说明 |
+| `cost_rate` | float | 0.0015 | 单边交易成本率（手续费 + 滑点）。每次换手的买入或卖出均按此比率扣费 |
+| `initial_capital` | float | 1,000,000 | 初始资金，仅用于结果展示，不影响收益率计算 |
+| `delay` | int | **1** | 因子延迟天数（`Ts_Delay`）。`1` 表示 T 日因子在 T+1 日后生效，防止日内使用未来数据；`0` 关闭延迟 |
+| `decay` | int | 0 | 线性衰减窗口（`Decay_Linear`）。对因子做线性加权移动平均，平滑信号、降低换手率；`0` 跳过 |
+| `industry` | Series/DataFrame/None | None | 行业映射（股票 → 行业标签），传入后自动对因子做 OLS 行业中性化（`Neutralize`）；`None` 跳过 |
+| `start_date` | str/None | None | 回测评估起始日期（如 `'2022-06-01'`）。不影响因子历史窗口计算，仅截取净值曲线区间；`None` 不限制 |
+| `end_date` | str/None | None | 回测评估结束日期（如 `'2023-12-31'`）。不影响因子历史窗口计算，仅截取净值曲线区间；`None` 不限制 |
 
-##### `Ts_Delay(df, period)` — 数据滞后 N 天
+PLACEHOLDER_SPLIT_MARKER
 
 等价于 `df.shift(period)`。常用于构造"N天前的值"参与计算。
 
