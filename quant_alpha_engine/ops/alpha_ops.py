@@ -26,6 +26,9 @@ AlphaOps — QuantAlpha_Engine 算子库
 技术指标 (Technical)
     RSI, KDJ, MACD
 
+缩量稳价因子 (VolSpike-PriceStable)
+    VolSpike, PriceVarShrink, PriceMeanShrink, VolSpikeStablePrice
+
 用法示例
 --------
 >>> from quant_alpha_engine.ops import AlphaOps as op
@@ -33,6 +36,8 @@ AlphaOps — QuantAlpha_Engine 算子库
 >>> factor2 = op.Neutralize(op.Rank(op.Ts_Corr(volume, close, 10)), industry)
 >>> f_rsi  = op.RSI(close, window=14)
 >>> f_macd = op.MACD(close, fast=12, slow=26, signal=9)
+>>> # 缩量稳价复合因子（量能异动 + 价格收敛信号）
+>>> f_vssp = op.VolSpikeStablePrice(turnover, close, open_, n_short=3, n_long=10)
 """
 
 from __future__ import annotations
@@ -911,3 +916,412 @@ class AlphaOps:
         signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
         histogram  = macd_line - signal_line
         return histogram
+
+    # ==================================================================
+    # 缩量稳价因子 (VolSpike-PriceStable)
+    # ==================================================================
+    #
+    # 核心逻辑：找出成交量（换手率）突然放大，但价格波动却异常收缩的股票。
+    # 此类信号常见于主力资金在建仓阶段刻意压制价格波动的行为特征：
+    #   - 大量成交发生，但买卖双方力量均衡，价格纹丝不动
+    #   - 暗示水下筹码交换（洗盘/建仓），属于潜伏信号
+    #
+    # 三个子因子：
+    #   VolSpike        — 换手率近期均值 / 历史均值（量能放大倍数）
+    #   PriceVarShrink  — 价格方差近期 / 历史（波动收缩程度）
+    #   PriceMeanShrink — 收盘价均值近期 / 历史（价格趋势下移程度）
+    #
+    # 复合因子：
+    #   VolSpikeStablePrice — 同时满足量放大、价格方差收缩、均价下移的综合信号
+    # ==================================================================
+
+    @staticmethod
+    def VolSpike(
+        turnover: pd.DataFrame,
+        n_short: int = 3,
+        n_long: int = 10,
+        n_multiple: float = 2.0,
+    ) -> pd.DataFrame:
+        """
+        成交量（换手率）放大因子（Volume Spike Ratio）。
+
+        衡量当前短期换手率相对历史基准的放大程度：
+            VolSpike = M1 / M2
+
+        其中：
+            M1 = mean(turnover, n_short)              — 最近 n_short 天均换手率
+            M2 = mean(turnover[t-n_short-n_long : t-n_short], n_long)
+                                                       — 前 n_long 天均换手率（基准期）
+
+        判定条件（量显著放大）：
+            VolSpike > n_multiple（即 M1 > M2 × n_multiple）
+
+        经济含义：
+          - VolSpike >> 1 → 近期成交量相比历史大幅放大，市场活跃度激增
+          - 结合价格波动收缩（PriceVarShrink）可识别"量增价稳"的建仓行为
+          - 单独使用时也可作为市场情绪/活跃度的代理指标
+
+        Parameters
+        ----------
+        turnover   : 换手率矩阵 (T × N)，值为每日换手率（如 0.02 表示 2%）
+                     也可替换为成交量、成交额等量能代理指标
+        n_short    : 短期观察窗口（天数），观察当前异动，默认 3 天
+        n_long     : 长期基准窗口（天数），作为背景对比，默认 10 天
+        n_multiple : 判定"显著放大"的倍数阈值（即 vol_mult 参数），默认 2.0
+                     VolSpike > n_multiple 时视为量能显著放大
+
+        Returns
+        -------
+        pd.DataFrame : 量能放大比率 (T × N)，值 ≥ 0
+                       值域无界（典型范围 [0, 5]），前 n_short+n_long-1 行为 NaN
+                       M2 ≤ 0 或为 NaN 时对应位置返回 NaN
+
+        Notes
+        -----
+        基准期（M2）取 t 日往前推 n_short 天之外的 n_long 天，
+        确保短期窗口（M1）与基准期（M2）完全不重叠，避免自相关。
+        """
+        # M1：最近 n_short 天均换手率
+        m1 = turnover.rolling(window=n_short, min_periods=n_short).mean()
+
+        # M2：基准期（向前跳过 n_short 天，再取 n_long 天）
+        # 实现：先对换手率做 n_short 天延迟，再取 n_long 天均值
+        m2 = turnover.shift(n_short).rolling(window=n_long, min_periods=n_long).mean()
+
+        # 避免除以零或基准为零
+        m2_safe = m2.copy()
+        m2_safe[m2_safe.abs() < 1e-10] = np.nan
+
+        return m1 / m2_safe
+
+    @staticmethod
+    def PriceVarShrink(
+        close: pd.DataFrame,
+        open_: pd.DataFrame,
+        n_short: int = 3,
+        n_long: int = 10,
+        n_multiple: float = 0.5,
+    ) -> pd.DataFrame:
+        """
+        价格方差收缩因子（Price Variance Shrink Ratio）。
+
+        衡量近期价格波动相对历史基准的收缩程度：
+            PriceVarShrink = V1 / V2
+
+        其中，方差计算将收盘价与开盘价合并后联合计算（增大样本量，更稳健）：
+            combined_short = [close_{t-n+1..t}, open_{t-n+1..t}]  合并为 2×n_short 个点
+            combined_long  = [close_{t-n_s-n_l+1..t-n_s}, open_{...}]  2×n_long 个点
+            V1 = var(combined_short)
+            V2 = var(combined_long)
+
+        判定条件（波动显著收缩）：
+            PriceVarShrink < n_multiple（即 V1 < V2 × n_multiple）
+
+        经济含义：
+          - PriceVarShrink << 1 → 近期价格波动大幅收窄（无论开盘/收盘均如此）
+          - 结合量能放大（VolSpike）构成"量大价稳"信号
+          - 价格方差收缩越小，说明买卖双方在博弈中越趋于均衡（筹码交换）
+
+        Parameters
+        ----------
+        close      : 收盘价矩阵 (T × N)
+        open_      : 开盘价矩阵 (T × N)（注意：Python 保留字，参数名用 open_）
+        n_short    : 短期方差计算窗口（天数），默认 3 天
+        n_long     : 长期方差基准窗口（天数），默认 10 天
+        n_multiple : 判定"显著收缩"的倍数阈值（即 pricevar_shrink 参数），默认 0.5
+                     PriceVarShrink < n_multiple 时视为价格波动显著收缩
+
+        Returns
+        -------
+        pd.DataFrame : 价格方差收缩比率 (T × N)，值 ≥ 0
+                       值越小表示近期波动相对历史越收缩
+                       V2 ≤ 0 或为 NaN 时对应位置返回 NaN
+
+        Notes
+        -----
+        合并开盘价与收盘价后一起计算方差，等效于同时关注日内振幅与日间波动，
+        使短窗口（如 3 天只有 6 个点）的估计更稳健。
+        基准期同样跳过 n_short 天，与 VolSpike 逻辑保持一致，确保窗口不重叠。
+        """
+        def _rolling_var_combined(
+            price_a: pd.DataFrame,
+            price_b: pd.DataFrame,
+            window: int,
+            shift: int = 0,
+        ) -> pd.DataFrame:
+            """将两个价格序列合并后计算滚动方差（逐列 apply）。"""
+            if shift > 0:
+                price_a = price_a.shift(shift)
+                price_b = price_b.shift(shift)
+
+            def _col_var(col_a: pd.Series, col_b: pd.Series) -> pd.Series:
+                """对单列合并序列求滚动方差。"""
+                def _var_window(idx: int) -> float:
+                    if idx < window - 1:
+                        return np.nan
+                    a_vals = col_a.iloc[idx - window + 1 : idx + 1].values
+                    b_vals = col_b.iloc[idx - window + 1 : idx + 1].values
+                    combined = np.concatenate([a_vals, b_vals])
+                    valid = combined[~np.isnan(combined)]
+                    if len(valid) < 3:
+                        return np.nan
+                    return float(np.var(valid, ddof=1))
+
+                return pd.Series(
+                    [_var_window(i) for i in range(len(col_a))],
+                    index=col_a.index,
+                )
+
+            result = {}
+            for col in price_a.columns:
+                result[col] = _col_var(price_a[col], price_b[col])
+            return pd.DataFrame(result, index=price_a.index)[price_a.columns]
+
+        # V1：最近 n_short 天，合并 close + open 的方差
+        v1 = _rolling_var_combined(close, open_, window=n_short, shift=0)
+
+        # V2：基准期，向前跳过 n_short 天后取 n_long 天，合并 close + open 的方差
+        v2 = _rolling_var_combined(close, open_, window=n_long, shift=n_short)
+
+        # 避免除以零
+        v2_safe = v2.copy()
+        v2_safe[v2_safe.abs() < 1e-10] = np.nan
+
+        return v1 / v2_safe
+
+    @staticmethod
+    def PriceMeanShrink(
+        close: pd.DataFrame,
+        n_short: int = 3,
+        n_long: int = 10,
+        n_multiple: float = 0.98,
+    ) -> pd.DataFrame:
+        """
+        收盘价均值下移因子（Price Mean Shrink Ratio）。
+
+        衡量近期收盘价均值相对历史基准的相对水平：
+            PriceMeanShrink = P1 / P2
+
+        其中：
+            P1 = mean(close, n_short)              — 最近 n_short 天均价
+            P2 = mean(close[t-n_short-n_long : t-n_short], n_long)
+                                                    — 前 n_long 天均价（基准期）
+
+        判定条件（价格均值相对下移）：
+            PriceMeanShrink < n_multiple（即 P1 < P2 × n_multiple）
+
+        经济含义：
+          - PriceMeanShrink < 1 → 近期均价低于历史基准，股价处于下沉趋势
+          - 与量能放大结合时，表现为"量增价跌"或"量增价横"中的价格滑落
+          - 主力在打压吸筹时常见此形态：增量换手但均价小幅走低
+          - 值域通常在 [0.9, 1.1] 附近；<1 为价格下移，>1 为价格上移
+
+        Parameters
+        ----------
+        close      : 收盘价矩阵 (T × N)
+        n_short    : 短期均值计算窗口（天数），默认 3 天
+        n_long     : 长期基准窗口（天数），默认 10 天
+        n_multiple : 判定"价格均值下移"的倍数阈值（即 price_shrink 参数），默认 0.98
+                     PriceMeanShrink < n_multiple 时视为均价显著下移
+
+        Returns
+        -------
+        pd.DataFrame : 价格均值比率 (T × N)，值 > 0
+                       < 1 表示均价下移，> 1 表示均价上移，= 1 表示持平
+                       P2 ≤ 0 或为 NaN 时对应位置返回 NaN
+
+        Notes
+        -----
+        基准期同样跳过 n_short 天，与 VolSpike / PriceVarShrink 逻辑一致，
+        三个子因子对应同一组时间窗口，可直接复合叠加。
+        """
+        # P1：最近 n_short 天均价
+        p1 = close.rolling(window=n_short, min_periods=n_short).mean()
+
+        # P2：基准期（向前跳过 n_short 天，再取 n_long 天均值）
+        p2 = close.shift(n_short).rolling(window=n_long, min_periods=n_long).mean()
+
+        # 避免除以零（价格序列通常 > 0，但防御性处理）
+        p2_safe = p2.copy()
+        p2_safe[p2_safe.abs() < 1e-10] = np.nan
+
+        return p1 / p2_safe
+
+    @staticmethod
+    def VolSpikeStablePrice(
+        turnover: pd.DataFrame,
+        close: pd.DataFrame,
+        open_: pd.DataFrame,
+        n_short: int = 3,
+        n_long: int = 10,
+        n_multiple: float = 2.0,
+        vol_mult: float = 2.0,
+        pricevar_shrink: float = 0.5,
+        price_shrink: float = 0.98,
+    ) -> pd.DataFrame:
+        """
+        缩量稳价复合因子（Volume Spike + Stable Price Composite）。
+
+        同时捕捉"换手率显著放大"、"价格方差显著收缩"、"均价小幅下移"三重信号，
+        三者同时满足时得分更高，用于识别主力建仓/筹码交换行为。
+
+        子因子计算：
+            S1 = VolSpike(turnover, n_short, n_long)        — 量能放大比（M1/M2）
+            S2 = PriceVarShrink(close, open_, n_short, n_long) — 价格方差收缩比（V1/V2）
+            S3 = PriceMeanShrink(close, n_short, n_long)    — 均价下移比（P1/P2）
+
+        各子因子信号方向：
+            S1 越大（量越放大）→ 信号越强，乘以正权重
+            S2 越小（波动越收缩）→ 信号越强，取倒数或负号
+            S3 越小（价格越下移）→ 信号越强，取倒数或负号
+
+        复合打分（三重归一化后加权）：
+            综合信号 = w1 × ZScore(S1) + w2 × ZScore(-S2) + w3 × ZScore(-S3)
+
+        其中各自的截止阈值（vol_mult / pricevar_shrink / price_shrink）决定
+        各子因子是否真正"显著"——得分由原始比率直接计算，阈值参数供外部分析使用。
+
+        Parameters
+        ----------
+        turnover        : 换手率矩阵 (T × N)
+        close           : 收盘价矩阵 (T × N)
+        open_           : 开盘价矩阵 (T × N)
+        n_short         : 短期观察窗口（天数），默认 3 天
+        n_long          : 长期基准窗口（天数），默认 10 天
+        n_multiple      : 三个子因子共用的基础倍数参数，传入各子因子的 n_multiple
+                          （当三个阈值需统一调整时使用；独立调整请分别设置下方参数）
+        vol_mult        : 量能放大的判定阈值（VolSpike > vol_mult 为显著），默认 2.0
+                          覆盖 n_multiple 对 VolSpike 子因子的影响
+        pricevar_shrink : 价格方差收缩的判定阈值（PriceVarShrink < pricevar_shrink 为显著），
+                          默认 0.5；覆盖 n_multiple 对 PriceVarShrink 子因子的影响
+        price_shrink    : 均价下移的判定阈值（PriceMeanShrink < price_shrink 为显著），
+                          默认 0.98；覆盖 n_multiple 对 PriceMeanShrink 子因子的影响
+
+        Returns
+        -------
+        pd.DataFrame : 复合因子得分 (T × N)，值域无界（截面 ZScore 标准化后的线性组合）
+                       正值表示"量增价稳"信号强度越高
+                       前 n_short+n_long-1 行为 NaN
+
+        Notes
+        -----
+        1. 三个子因子先做截面 ZScore 标准化，再等权相加，确保量纲统一。
+        2. S2（价格方差比）取负号后 ZScore，使"波动越收缩 → 得分越高"。
+        3. S3（均价比）取负号后 ZScore，使"均价越下移 → 得分越高"。
+        4. 阈值参数（vol_mult / pricevar_shrink / price_shrink）不影响因子值的
+           计算逻辑，仅作为策略层面的参考阈值，供外部条件筛选使用。
+        5. 如需仅保留"三重信号同时满足"的股票，可在外部做如下掩码：
+               mask = (S1 > vol_mult) & (S2 < pricevar_shrink) & (S3 < price_shrink)
+               factor = composite.where(mask)
+        """
+        # ── 计算三个子因子 ──────────────────────────────────────────
+        s1 = AlphaOps.VolSpike(
+            turnover,
+            n_short=n_short,
+            n_long=n_long,
+            n_multiple=vol_mult,
+        )
+        s2 = AlphaOps.PriceVarShrink(
+            close,
+            open_,
+            n_short=n_short,
+            n_long=n_long,
+            n_multiple=pricevar_shrink,
+        )
+        s3 = AlphaOps.PriceMeanShrink(
+            close,
+            n_short=n_short,
+            n_long=n_long,
+            n_multiple=price_shrink,
+        )
+
+        # ── 截面 ZScore 标准化 + 方向对齐 ─────────────────────────
+        # S1：量能越大 → 得分越高（正向）
+        z1 = AlphaOps.ZScore(s1)
+
+        # S2：波动越收缩（比率越小）→ 得分越高（取负后标准化）
+        z2 = AlphaOps.ZScore(-s2)
+
+        # S3：均价越下移（比率越小）→ 得分越高（取负后标准化）
+        z3 = AlphaOps.ZScore(-s3)
+
+        # ── 等权复合 ───────────────────────────────────────────────
+        composite = (z1 + z2 + z3) / 3.0
+
+        return composite
+
+    # ──────────────────────────────────────────────────────────────────────
+    # 🆕 V3 扩展：布林带异动因子
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def Bollinger_Outlier_Frequency(
+        close: pd.DataFrame,
+        period: int = 30,
+        k: float = 3.5,
+        lookback_window: int = 60,
+    ) -> pd.DataFrame:
+        """
+        布林带极端突破频率因子（Bollinger Band Outlier Frequency）。
+
+        计算在过去 lookback_window 天内，收盘价突破极宽布林带（k 倍标准差）
+        上轨或下轨的天数占比，衡量股票的"破位"特征与极端趋势强度。
+
+        计算步骤：
+            1. 中轨 (MB)    = close 的 period 日简单移动平均
+            2. 标准差 (std) = close 的 period 日滚动标准差
+            3. 上轨 (Upper) = MB + k * std
+            4. 下轨 (Lower) = MB - k * std
+            5. 离群判定：close > Upper 或 close < Lower，记为 1，否则记为 0
+            6. 频率得分    = rolling_mean(outlier, lookback_window)
+                            即过去 lookback_window 天内离群天数占总天数的比例
+
+        经济含义：
+          - 频率越高 → 股价反复冲破极宽布林带，趋势极强或存在异常波动
+          - k=3.5 的极宽设定使得正态分布下理论突破概率 < 0.05%，
+            实际突破代表真实的价格异常或趋势性突破
+          - 高频率信号可用于动量跟踪（趋势持续性强）或异常检测（价格行为异常）
+
+        Parameters
+        ----------
+        close          : 收盘价矩阵 (T × N)
+        period         : 布林带均线与标准差的计算窗口（天数），默认 30 天
+        k              : 标准差倍数，默认 3.5（极宽带，理论突破率 < 0.05%）
+        lookback_window: 统计突破频率的回测窗口（天数），默认 60 天
+
+        Returns
+        -------
+        pd.DataFrame : 突破频率 (T × N)，值域 [0, 1]
+                       0 = 过去 lookback_window 天内从未突破布林带
+                       1 = 每天都在突破布林带
+                       前 period + lookback_window - 2 行为 NaN
+
+        Notes
+        -----
+        - std 为 0（价格完全无波动）时，将 std_safe 置为 NaN，
+          避免虚假突破信号（价格等于均值却因 std=0 导致 Upper=Lower=MB）
+        - 建议与 Rank() 搭配使用做截面排名后送入 VectorEngine
+        """
+        # ── Step 1 & 2：中轨 + 标准差 ─────────────────────────────────
+        mb  = close.rolling(window=period, min_periods=period).mean()
+        std = close.rolling(window=period, min_periods=period).std()
+
+        # 标准差为 0 时置 NaN（防止全价格相等导致虚假突破）
+        std_safe = std.copy()
+        std_safe[std_safe.abs() < 1e-10] = np.nan
+
+        # ── Step 3 & 4：上下轨 ────────────────────────────────────────
+        upper = mb + k * std_safe
+        lower = mb - k * std_safe
+
+        # ── Step 5：离群判定 (1 = 突破, 0 = 未突破) ───────────────────
+        outlier = ((close > upper) | (close < lower)).astype(float)
+        # 布林带本身为 NaN（窗口不足）时，outlier 也置为 NaN
+        outlier[mb.isna()] = np.nan
+
+        # ── Step 6：滚动频率（lookback_window 天内均值 = 突破比例）──────
+        freq = outlier.rolling(
+            window=lookback_window, min_periods=lookback_window
+        ).mean()
+
+        return freq
