@@ -19,7 +19,7 @@ VectorEngine — 矩阵式净值回测引擎
 
 回测逻辑
 --------
-1. 数据对齐（factor / close / is_suspended / is_limit 取交集）
+1. 数据对齐（factor / close / is_suspended / is_limit 取交集，可选 start_date/end_date 裁剪）
 2. 因子预处理（delay → decay → 行业中性化）
 3. 计算当日收益率 ret[T] = close[T] / close[T-1] - 1
 4. 按调仓频率生成持仓权重矩阵（Top-N 等权 or 因子加权）
@@ -33,6 +33,12 @@ VectorEngine — 矩阵式净值回测引擎
 - 权重 weights[T] 由 factor[T-1] 构建（delay=1 保证）
 - 收益 ret[T] = close[T]/close[T-1] - 1（当日收益，与权重同行对齐）
 - 组合收益：port_ret[T] = sum_i(weights[T,i] * ret[T,i])
+
+回测时间范围控制
+--------------
+- start_date / end_date 参数均为可选，格式为 'YYYY-MM-DD' 字符串或 None
+- 裁剪发生在数据对齐之后，不影响因子计算的历史窗口（因子已提前计算好）
+- 仅控制回测评估区间，适合做不同时间段的分段测试
 """
 
 from __future__ import annotations
@@ -120,6 +126,11 @@ class VectorEngine:
     decay           : 线性衰减窗口大小，默认 0（不衰减）；>0 时对因子做 Decay_Linear
     industry        : 行业映射（pd.Series 或 pd.DataFrame），用于因子行业中性化；
                       None（默认）表示跳过中性化
+    start_date      : 回测开始日期（含），格式 'YYYY-MM-DD' 或 None（不裁剪）。
+                      裁剪发生在数据对齐之后，因子已提前计算好，不影响历史窗口。
+                      例如：'2023-01-01' 表示仅对 2023年1月1日之后的数据进行回测评估。
+    end_date        : 回测结束日期（含），格式 'YYYY-MM-DD' 或 None（不裁剪）。
+                      例如：'2024-12-31' 表示仅对 2024年12月31日之前的数据进行回测评估。
 
     预处理执行顺序（均在数据对齐之后、权重构建之前）
     --------------------------------------------------
@@ -139,6 +150,8 @@ class VectorEngine:
     ...     delay=1,
     ...     decay=5,
     ...     industry=industry_series,
+    ...     start_date='2023-01-01',
+    ...     end_date='2024-12-31',
     ... )
     >>> result = engine.run()
     >>> result.print_summary()
@@ -160,6 +173,9 @@ class VectorEngine:
         delay:    int                                        = 1,
         decay:    int                                        = 0,
         industry: Optional[Union[pd.Series, pd.DataFrame]]  = None,
+        # ── 回测时间范围控制 ───────────────────────────────────
+        start_date: Optional[str]                           = None,
+        end_date:   Optional[str]                           = None,
     ):
         self.factor         = factor
         self.close          = close
@@ -173,6 +189,8 @@ class VectorEngine:
         self.delay          = delay
         self.decay          = decay
         self.industry       = industry
+        self.start_date     = start_date
+        self.end_date       = end_date
 
     # ------------------------------------------------------------------
     # 主入口
@@ -189,7 +207,9 @@ class VectorEngine:
         print("[VectorEngine] 开始对齐数据...")
         factor, close, is_suspended, is_limit = self._align_data()
 
-        print(f"[VectorEngine] 数据规模：{len(factor)} 个交易日 × {factor.shape[1]} 只股票")
+        # 打印时间范围信息
+        date_range_info = f"{factor.index[0].strftime('%Y-%m-%d')} ~ {factor.index[-1].strftime('%Y-%m-%d')}"
+        print(f"[VectorEngine] 数据规模：{len(factor)} 个交易日 × {factor.shape[1]} 只股票  [{date_range_info}]")
         print(f"[VectorEngine] 预处理参数：delay={self.delay}, decay={self.decay}, "
               f"neutralize={'是' if self.industry is not None else '否'}")
 
@@ -312,6 +332,9 @@ class VectorEngine:
         """
         对齐所有输入数据，取共同日期和股票子集。
         同时对 is_suspended 和 is_limit 做类型转换。
+
+        若设置了 start_date / end_date，则在取交集之后进一步裁剪日期范围。
+        裁剪仅影响回测评估区间，不影响因子本身的历史窗口计算。
         """
         # 取共同日期
         common_dates = (
@@ -327,6 +350,18 @@ class VectorEngine:
             .intersection(self.is_suspended.columns)
             .intersection(self.is_limit.columns)
         )
+
+        # ── 按 start_date / end_date 裁剪回测评估区间 ─────────────────
+        if self.start_date is not None:
+            common_dates = common_dates[common_dates >= pd.Timestamp(self.start_date)]
+        if self.end_date is not None:
+            common_dates = common_dates[common_dates <= pd.Timestamp(self.end_date)]
+
+        if len(common_dates) == 0:
+            raise ValueError(
+                f"裁剪后日期为空！请检查 start_date='{self.start_date}'、"
+                f"end_date='{self.end_date}' 是否在数据范围内。"
+            )
 
         factor       = self.factor.loc[common_dates, common_stocks]
         close        = self.close.loc[common_dates, common_stocks]
