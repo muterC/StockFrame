@@ -610,23 +610,30 @@ class RepositoryDataLoader:
 
     def _load_industry(self, symbols: List[str]) -> pd.Series:
         """
-        加载行业分类。优先从 reference/industry_classification.csv 读取，
+        加载行业分类。优先从 reference/industry_classification.csv 读取申万一级行业，
         若文件不存在则填充 'Unknown'。
+
+        CSV 格式（import_bloomberg_data.ipynb 生成）：
+            columns: symbol, name, sw1_name, sw2_name, sw3_name, sw3_code
 
         Returns
         -------
         pd.Series
-            index = 股票代码，values = 行业名称，name = 'industry'
+            index = 股票代码，values = 申万一级行业名称，name = 'industry'
         """
         industry_file = self.repo.reference_dir / "industry_classification.csv"
         if industry_file.exists():
             try:
-                industry_df = pd.read_csv(industry_file, index_col=0, encoding='utf-8')
-                # 兼容不同列名：stock / symbol / code
-                col_candidates = ['industry', '行业', 'industry_name', 'sector']
+                # symbol 列是普通列（非 index），dtype=str 防止前导0被截断
+                industry_df = pd.read_csv(industry_file, dtype={'symbol': str}, encoding='utf-8')
+
+                # 优先用申万一级；兼容旧格式的其他列名
+                col_candidates = ['sw1_name', 'industry', '行业', 'industry_name', 'sector']
                 industry_col = next((c for c in col_candidates if c in industry_df.columns), None)
-                if industry_col:
-                    mapping = industry_df[industry_col]
+
+                if industry_col and 'symbol' in industry_df.columns:
+                    # 建立 symbol → 行业 的映射字典
+                    mapping = industry_df.set_index('symbol')[industry_col].to_dict()
                     result = pd.Series(
                         {sym: mapping.get(sym, 'Unknown') for sym in symbols},
                         name='industry'
