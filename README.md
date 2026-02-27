@@ -4,6 +4,10 @@
 
 **v2.0.0 新特性** 🚀 新增 13 个预构建算子（时序/量价/动量/技术指标）+ `fusion` 多因子融合模块（统计融合 / 机器学习融合），支持一键输出 `BacktestResult`。
 
+**v2.1.0 新特性** 🕐 `VectorEngine` 支持 `start_date` / `end_date` 参数，灵活控制回测评估时间区间（不影响因子历史窗口计算）。
+
+**V3 新特性** 📊 新增 4 个缩量稳价因子算子（`VolSpike`、`PriceVarShrink`、`PriceMeanShrink`、`VolSpikeStablePrice`）。
+
 ---
 
 ## 目录
@@ -14,14 +18,7 @@
 - [依赖安装](#依赖安装)
 - [模块详解](#模块详解)
   - [MockDataGenerator — 模拟数据生成器](#1-mockdatagenerator--模拟数据生成器)
-  - [AlphaOps — 算子库](#2-alphaops--算子库)
-    - [时序类算子 (v1)](#时序类-time-series)
-    - [截面类算子 (v1)](#截面类-cross-sectional)
-    - [特殊类算子 (v1)](#特殊类-special)
-    - [🆕 时序统计算子 (v2)](#-时序统计算子-v2)
-    - [🆕 量价因子算子 (v2)](#-量价因子算子-v2)
-    - [🆕 动量因子算子 (v2)](#-动量因子算子-v2)
-    - [🆕 技术指标算子 (v2)](#-技术指标算子-v2)
+  - [AlphaOps — 算子库](#2-alphaops--算子库)（详细文档见 [FACTORS.md](./FACTORS.md)）
   - [VectorEngine — 回测引擎](#3-vectorengine--回测引擎)
   - [BacktestResult — 回测结果对象](#4-backtestresult--回测结果对象)
   - [Performance — 绩效指标计算](#5-performance--绩效指标计算)
@@ -81,7 +78,7 @@ quant_alpha_engine/
 ├── data/
 │   └── mock_generator.py          # 模拟数据生成器
 ├── ops/
-│   └── alpha_ops.py               # 算子库（v1: 13个 + v2: 13个新算子）
+│   └── alpha_ops.py               # 算子库（v1: 13个 + v2: 13个新算子 + V3: 4个缩量稳价算子）
 ├── backtest/
 │   ├── performance.py             # 绩效指标计算
 │   └── vector_engine.py           # 矩阵式净值回测引擎
@@ -94,8 +91,10 @@ quant_alpha_engine/
 
 QuantAlpha_Demo.ipynb              # v1 Jupyter 演示
 QuantAlpha_Demo_V2.ipynb           # 🆕 v2 Jupyter 演示（推荐入口，含融合框架）
+QuantAlpha_Demo_V3.ipynb           # 🆕 V3 Jupyter 演示（缩量稳价因子）
 demo.py                            # Python 脚本版演示
 requirements.txt                   # 依赖列表
+FACTORS.md                         # 📖 因子算子完整参考文档（独立文件）
 ```
 
 ---
@@ -110,13 +109,19 @@ jupyter notebook QuantAlpha_Demo_V2.ipynb
 
 包含所有 v2.0 新特性演示（13 个新算子 + 多因子融合完整流程）。
 
-**方式二：打开 V1 Jupyter Notebook（基础功能）**
+**方式二：打开 V3 Jupyter Notebook（缩量稳价因子）**
+
+```bash
+jupyter notebook QuantAlpha_Demo_V3.ipynb
+```
+
+**方式三：打开 V1 Jupyter Notebook（基础功能）**
 
 ```bash
 jupyter notebook QuantAlpha_Demo.ipynb
 ```
 
-**方式三：运行 Python 脚本**
+**方式四：运行 Python 脚本**
 
 ```bash
 python demo.py
@@ -245,119 +250,117 @@ bear_data = bear_gen.generate()
 
 所有算子均为**静态方法**，输入输出均为 `pd.DataFrame`（Index=时间，Columns=股票），支持任意嵌套组合。
 
-**统一约定：**
-- 所有 DataFrame 须按时间升序排列
-- 窗口不足时返回 `NaN`（不会报错）
-- 截面操作自动忽略 NaN（不参与排名/统计）
+> 📖 **因子算子完整参考文档（参数详解 / 公式 / 示例代码）请见：[FACTORS.md](./FACTORS.md)**
 
----
+#### 算子速查
 
-#### 时序类 (Time-Series)
+| 类别 | 算子 | 版本 | 简介 |
+|------|------|------|------|
+| **时序类** | `Ts_Sum` | v1 | 滚动求和 |
+| | `Ts_Mean` | v1 | 滚动均值 |
+| | `Ts_Max` | v1 | 滚动最大值 |
+| | `Ts_Min` | v1 | 滚动最小值 |
+| | `Ts_Std` | v1 | 滚动标准差 |
+| | `Ts_Delta` | v1 | N 日价格变化量 |
+| | `Ts_Delay` | v1 | N 日延迟（平移） |
+| | `Ts_Rank` | v1 | 时序百分位排名 |
+| | `Ts_Corr` | v1 | 滚动 Pearson 相关系数 |
+| **截面类** | `Rank` | v1 | 截面百分比排名 [0,1] |
+| | `ZScore` | v1 | 截面 Z-Score 标准化 |
+| | `Scale` | v1 | 截面绝对值归一化 |
+| **特殊类** | `Decay_Linear` | v1 | 线性衰减移动平均（平滑信号） |
+| | `Neutralize` | v1 | OLS 行业中性化 |
+| **时序统计** 🆕 | `Ts_Skew` | v2 | 滚动偏度（分布尾部风险） |
+| | `Ts_Kurt` | v2 | 滚动峰度（极端跳跃风险） |
+| | `Ts_Autocorr` | v2 | 滚动自相关系数（趋势/反转） |
+| | `Ts_Hurst` | v2 | Hurst 指数（长记忆性） |
+| **量价因子** 🆕 | `VWAP` | v2 | 成交量加权均价 |
+| | `VWAP_Bias` | v2 | VWAP 乖离率 |
+| | `PVDeviation` | v2 | 量价偏离度（标准化） |
+| | `Amihud` | v2 | Amihud 非流动性指标 |
+| **动量因子** 🆕 | `RiskAdjMomentum` | v2 | 风险调整动量（动量夏普） |
+| | `PricePathQuality` | v2 | 价格路径质量（趋势线性度） |
+| | `RangeBreakout` | v2 | 区间突破位置 [0,1] |
+| **技术指标** 🆕 | `RSI` | v2 | 相对强弱指数 [0,100] |
+| | `KDJ` | v2 | KDJ 指标 K 值 |
+| | `MACD` | v2 | MACD 柱状图（DIF-DEA） |
+| **缩量稳价** 🆕 | `VolSpike` | V3 | 成交量异动强度 |
+| | `PriceVarShrink` | V3 | 缩量价格波动收缩 |
+| | `PriceMeanShrink` | V3 | 缩量价格趋势平坦 |
+| | `VolSpikeStablePrice` | V3 | 缩量稳价综合评分（推荐）|
 
-时序算子在**单只股票的时间序列**上操作，逐列独立计算。
-
----
-
-##### `Ts_Sum(df, window)` — 滑动窗口求和
-
-```python
-result = op.Ts_Sum(df, window)
-```
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `df` | DataFrame | 输入矩阵（时间 × 股票） |
-| `window` | int | 求和窗口大小（天数），如 `5` 表示过去5天之和 |
-
-**返回：** 与 `df` 同形状的 DataFrame，前 `window-1` 行为 NaN。
-
-```python
-# 5日成交量之和（衡量近期活跃度）
-vol_sum5 = op.Ts_Sum(data.volume, 5)
-
-# 20日价格涨跌之和（多空力量积累）
-pnl_sum = op.Ts_Sum(op.Ts_Delta(data.close, 1), 20)
-```
-
----
-
-##### `Ts_Mean(df, window)` — 滑动窗口均值（移动平均）
-
-```python
-result = op.Ts_Mean(df, window)
-```
-
-| 参数 | 说明 |
-|------|------|
-| `window` | 均值窗口大小（天数） |
+#### 快速使用示例
 
 ```python
-ma20 = op.Ts_Mean(data.close, 20)   # 20日移动平均
-# 价格偏离移动均线的程度
-deviation = data.close / op.Ts_Mean(data.close, 20) - 1
-```
+from quant_alpha_engine.ops import AlphaOps as op
 
----
+# 时序 + 截面组合（最常见模式）
+factor = op.Rank(op.Ts_Delta(data.close, 5))
 
-##### `Ts_Max(df, window)` / `Ts_Min(df, window)` — 滑动窗口极值
+# 量价背离 + 行业中性化
+factor_vp = op.Neutralize(
+    op.Rank(-op.Ts_Corr(data.volume, data.close, 10)),
+    data.industry
+)
 
-```python
-result = op.Ts_Max(df, window)
-result = op.Ts_Min(df, window)
-```
-
-```python
-# 20日最高价（用于计算价格位置）
-high20 = op.Ts_Max(data.high, 20)
-low20  = op.Ts_Min(data.low, 20)
-
-# 价格在近20日区间内的位置（0=最低点，1=最高点）
-price_pos = (data.close - low20) / (high20 - low20 + 1e-8)
+# V3 缩量稳价核心因子
+factor_vss = op.Rank(
+    op.VolSpikeStablePrice(data.close, data.volume,
+                           price_window=10, vol_window=20)
+)
 ```
 
 ---
 
-##### `Ts_Std(df, window)` — 滑动窗口标准差
+### 3. VectorEngine — 回测引擎
+
+**导入路径：** `from quant_alpha_engine.backtest import VectorEngine`
+
+矩阵式净值回测引擎，接收因子矩阵和行情数据，输出完整回测结果。
+
+#### 构造参数
 
 ```python
-result = op.Ts_Std(df, window)
+VectorEngine(
+    factor          = factor_df,     # 必填：因子矩阵
+    close           = close_df,      # 必填：收盘价矩阵
+    is_suspended    = susp_df,       # 必填：停牌矩阵
+    is_limit        = limit_df,      # 必填：涨跌停矩阵
+    rebalance_freq  = 1,             # 调仓频率（天数）
+    top_n           = 50,            # 持仓股票数
+    weight_method   = 'equal',       # 权重方式
+    cost_rate       = 0.0015,        # 单边交易成本
+    initial_capital = 1_000_000.0,   # 初始资金（仅展示用）
+    # ── 内置预处理参数（v2.0 新增）────────────────────────────
+    delay           = 1,             # 因子延迟天数（0=不延迟）
+    decay           = 0,             # 线性衰减窗口（0=不衰减）
+    industry        = None,          # 行业映射，None=跳过中性化
+    # ── 回测时间范围控制（v2.1 新增）─────────────────────────
+    start_date      = None,          # 回测开始日期，如 '2022-06-01'，None=不限制
+    end_date        = None,          # 回测结束日期，如 '2023-12-31'，None=不限制
+)
 ```
 
-```python
-# 20日价格波动率（用于构造低波动因子）
-vol20 = op.Ts_Std(data.close.pct_change(), 20)
-# 低波动因子：波动率越低，排名越靠前
-low_vol_factor = op.Rank(-vol20)
-```
+#### 参数详解
 
----
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `factor` | DataFrame | — | **必填**。因子矩阵（T × N），值越大代表该股票越应该被买入 |
+| `close` | DataFrame | — | **必填**。收盘价矩阵（T × N），用于计算每日收益率 |
+| `is_suspended` | DataFrame | — | **必填**。停牌矩阵（T × N，bool）。停牌股票当日权重自动置零 |
+| `is_limit` | DataFrame | — | **必填**。涨跌停矩阵（T × N，bool）。涨跌停股票当日权重自动置零（无法成交）|
+| `rebalance_freq` | int | 1 | 调仓频率。`1`=每日调仓，`5`=每周调仓，`21`≈每月调仓。非调仓日持仓不变 |
+| `top_n` | int | 50 | 每次调仓时，按因子值排名取前 N 只股票持仓。若可交易股票不足 N 只，则取全部可交易股票 |
+| `weight_method` | str | `'equal'` | 持仓权重计算方式，见下方说明 |
+| `cost_rate` | float | 0.0015 | 单边交易成本率（手续费 + 滑点）。每次换手的买入或卖出均按此比率扣费 |
+| `initial_capital` | float | 1,000,000 | 初始资金，仅用于结果展示，不影响收益率计算 |
+| `delay` | int | **1** | 因子延迟天数（`Ts_Delay`）。`1` 表示 T 日因子在 T+1 日后生效，防止日内使用未来数据；`0` 关闭延迟 |
+| `decay` | int | 0 | 线性衰减窗口（`Decay_Linear`）。对因子做线性加权移动平均，平滑信号、降低换手率；`0` 跳过 |
+| `industry` | Series/DataFrame/None | None | 行业映射（股票 → 行业标签），传入后自动对因子做 OLS 行业中性化（`Neutralize`）；`None` 跳过 |
+| `start_date` | str/None | None | 回测评估起始日期（如 `'2022-06-01'`）。不影响因子历史窗口计算，仅截取净值曲线区间；`None` 不限制 |
+| `end_date` | str/None | None | 回测评估结束日期（如 `'2023-12-31'`）。不影响因子历史窗口计算，仅截取净值曲线区间；`None` 不限制 |
 
-##### `Ts_Delta(df, period)` — N 日价差（动量/反转核心）
-
-计算 `df - df.shift(period)`，即当前值与 N 天前的差。
-
-```python
-result = op.Ts_Delta(df, period)
-```
-
-| 参数 | 说明 |
-|------|------|
-| `period` | 回看期数（天数） |
-
-```python
-# 5日价格变化（短期动量）
-delta5  = op.Ts_Delta(data.close, 5)
-
-# 20日价格变化（中期动量）
-delta20 = op.Ts_Delta(data.close, 20)
-
-# 反转因子：近期跌幅越大 → 排名越靠前（值越小对应排名越高）
-reversal = op.Rank(-op.Ts_Delta(data.close, 5))
-```
-
----
-
-##### `Ts_Delay(df, period)` — 数据滞后 N 天
+PLACEHOLDER_SPLIT_MARKER
 
 等价于 `df.shift(period)`。常用于构造"N天前的值"参与计算。
 

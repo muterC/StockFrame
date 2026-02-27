@@ -167,6 +167,8 @@ class FactorCombiner(ABC):
         delay: int = 0,
         decay: int = 0,
         industry=None,
+        start_date=None,
+        end_date=None,
     ) -> BacktestResult:
         """
         将合成因子传入 VectorEngine 进行全量回测，返回 BacktestResult。
@@ -188,6 +190,8 @@ class FactorCombiner(ABC):
         delay          : 因子延迟天数，默认 0（融合器输出通常已处理好时序，无需再延迟）
         decay          : 线性衰减窗口，默认 0（不衰减）
         industry       : 行业映射，默认 None（不做中性化）
+        start_date     : 回测开始日期（str，如 '2022-06-01'），None=不限制（v2.1 新增）
+        end_date       : 回测结束日期（str，如 '2023-12-31'），None=不限制（v2.1 新增）
 
         Returns
         -------
@@ -214,6 +218,8 @@ class FactorCombiner(ABC):
             delay=delay,
             decay=decay,
             industry=industry,
+            start_date=start_date,
+            end_date=end_date,
         )
         return engine.run()
 
