@@ -328,7 +328,8 @@ class DataRepository:
 
         Args:
             symbol: 股票代码
-            data: 市值数据（date为索引，包含total_market_cap, circulating_market_cap等列）
+            data: 市值数据（date为索引，列可包含 total_market_cap、circulating_market_cap、pe 等，
+                    所有列均为可选，按需传入即可）
 
         Returns:
             保存的文件路径
@@ -617,6 +618,62 @@ class DataRepository:
                 return True
 
         return False
+
+    # ==================== 行业分类方法 ====================
+
+    def save_industry_classification(self, data: pd.DataFrame) -> Path:
+        """
+        保存行业分类数据到 reference/industry_classification.csv（纯覆盖写入）。
+
+        Args:
+            data: 行业分类 DataFrame，要求包含以下列：
+                - symbol          : 股票代码（6位，如 '000001'）
+                - sw1_name        : 申万一级行业名称
+                - sw2_name        : 申万二级行业名称
+                - sw3_name        : 申万三级行业名称
+                - sw1_code        : 申万一级行业代码（可选）
+                - sw2_code        : 申万二级行业代码（可选）
+                - sw3_code        : 申万三级行业代码（可选）
+                索引无要求，symbol 为普通列。
+
+        Returns:
+            保存的文件路径
+        """
+        if data.empty:
+            raise RuntimeError("不能保存空数据")
+
+        required_cols = ['symbol', 'sw1_name', 'sw2_name', 'sw3_name']
+        missing = [c for c in required_cols if c not in data.columns]
+        if missing:
+            raise RuntimeError(f"缺少必需列: {missing}")
+
+        file_path = self.reference_dir / "industry_classification.csv"
+        data.to_csv(file_path, index=False)
+        return file_path
+
+    def load_industry_classification(
+        self,
+        symbols: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """
+        加载行业分类数据。
+
+        Args:
+            symbols: 指定股票代码列表；None 表示返回全部
+
+        Returns:
+            行业分类 DataFrame，symbol 为普通列
+        """
+        file_path = self.reference_dir / "industry_classification.csv"
+        if not file_path.exists():
+            raise RuntimeError("行业分类数据不存在，请先运行导入流程")
+
+        data = pd.read_csv(file_path, dtype={'symbol': str})
+
+        if symbols is not None:
+            data = data[data['symbol'].isin(symbols)].reset_index(drop=True)
+
+        return data
 
     # ==================== 私有方法 ====================
 

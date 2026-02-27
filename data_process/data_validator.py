@@ -202,6 +202,13 @@ class DataValidator:
             if invalid > 0:
                 errors.append(f"发现 {invalid} 行流通市值 > 总市值")
 
+        if 'pe' in data.columns:
+            # PE 为负属于亏损股的正常情况，仅记录，不作为校验失败条件
+            neg = (data['pe'].dropna() < 0).sum()
+            if neg > 0:
+                import logging
+                logging.getLogger(__name__).debug(f"PE 列存在 {neg} 行负值（亏损股正常）")
+
         dup_df = DataValidator.check_duplicates(data)
         if not dup_df.empty:
             errors.append(f"发现 {len(dup_df)} 行重复索引")
