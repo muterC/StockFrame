@@ -450,49 +450,90 @@ class VectorEngine:
 # ===========================================================================
 
 def _print_metrics_table(metrics: dict) -> None:
-    """使用 Unicode 制表符在控制台打印美观的绩效指标表格。
+    """以 pandas Styler 表格形式输出绩效报告（Jupyter 显示为 HTML，终端回退为纯文本）。"""
 
-    中文字符在等宽终端中占 2 列宽度，需要用显示宽度而非字符数来对齐。
-    """
+    # ── 多档位阈值定义 ──────────────────────────────────────
+    # 格式：(上界, 评价文字, 背景色HEX)，按上界从小到大排列，最后一条上界为 None
+    _BANDS: dict[str, dict] = {
+        "年化收益率": {
+            "lower_is_better": False,
+            "bands": [
+                (0.15, "较差",   "#c0392b"),
+                (0.25, "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "Sharpe_Ratio": {
+            "lower_is_better": False,
+            "bands": [
+                (1.0,  "较差",   "#c0392b"),
+                (1.5,  "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "最大回撤": {
+            "lower_is_better": True,
+            "bands": [
+                (0.05, "优秀",   "#27ae60"),
+                (0.10, "良好",   "#2980b9"),
+                (None, "较差",   "#c0392b"),
+            ],
+        },
+        "IC_Mean": {
+            "lower_is_better": False,
+            "bands": [
+                (0.03, "较差",   "#c0392b"),
+                (0.05, "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "ICIR": {
+            "lower_is_better": False,
+            "bands": [
+                (1.5,  "较差",   "#c0392b"),
+                (2.5,  "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "IC_胜率": {
+            "lower_is_better": False,
+            "bands": [
+                (0.55, "较差",   "#c0392b"),
+                (0.60, "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "年化波动率": {
+            "lower_is_better": True,
+            "bands": [
+                (0.10, "低风险",   "#27ae60"),
+                (0.20, "中风险",   "#2980b9"),
+                (0.30, "高风险",   "#c0392b"),
+                (None, "极高风险", "#8e44ad"),
+            ],
+        },
+        "Calmar_Ratio": {
+            "lower_is_better": False,
+            "bands": [
+                (0.5,  "不合格", "#c0392b"),
+                (1.0,  "合格",   "#d4ac0d"),
+                (2.0,  "良好",   "#2980b9"),
+                (None, "优秀",   "#27ae60"),
+            ],
+        },
+        "IC_Std": {
+            "lower_is_better": True,
+            "bands": [
+                (0.10, "极稳定", "#27ae60"),
+                (0.15, "稳定",   "#2980b9"),
+                (0.20, "波动",   "#d4ac0d"),
+                (None, "不稳",   "#8e44ad"),
+            ],
+        },
+    }
 
-    def _display_width(s: str) -> int:
-        """计算字符串在等宽终端中的显示列宽（中/日/韩字符占 2 列，其余占 1 列）。"""
-        width = 0
-        for ch in s:
-            cp = ord(ch)
-            # CJK Unified Ideographs, CJK Extension, CJK Compatibility,
-            # CJK Symbols, Hiragana, Katakana, Hangul, Fullwidth Forms 等
-            if (
-                (0x1100 <= cp <= 0x11FF)   # Hangul Jamo
-                or (0x2E80 <= cp <= 0x9FFF)  # CJK 各区块（含部首、统一表意文字）
-                or (0xA000 <= cp <= 0xA4CF)  # Yi Syllables
-                or (0xAC00 <= cp <= 0xD7AF)  # Hangul Syllables
-                or (0xF900 <= cp <= 0xFAFF)  # CJK Compatibility Ideographs
-                or (0xFE10 <= cp <= 0xFE1F)  # Vertical Forms
-                or (0xFE30 <= cp <= 0xFE4F)  # CJK Compatibility Forms
-                or (0xFF01 <= cp <= 0xFF60)  # Fullwidth Latin / Katakana
-                or (0xFFE0 <= cp <= 0xFFE6)  # Fullwidth Signs
-                or (0x20000 <= cp <= 0x2FFFD) # CJK Extension B-F
-            ):
-                width += 2
-            else:
-                width += 1
-        return width
-
-    def _ljust_display(s: str, width: int, fill: str = ' ') -> str:
-        """按显示宽度左对齐，不足则补 fill。"""
-        pad = width - _display_width(s)
-        return s + fill * max(pad, 0)
-
-    def _center_display(s: str, width: int, fill: str = ' ') -> str:
-        """按显示宽度居中。"""
-        pad = width - _display_width(s)
-        left = pad // 2
-        right = pad - left
-        return fill * left + s + fill * right
-
-    def fmt(key: str, val) -> str:
-        """格式化指标值为右对齐字符串（纯 ASCII，固定宽度）。"""
+    def _fmt(key: str, val) -> str:
+        """格式化指标值为字符串。"""
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return "N/A"
         pct_keys = {"年化收益率", "年化波动率", "最大回撤", "日均换手率", "年化手续费", "IC_胜率"}
@@ -500,47 +541,102 @@ def _print_metrics_table(metrics: dict) -> None:
             return f"{val * 100:+.2f}%"
         elif key in {"Sharpe_Ratio", "Calmar_Ratio", "Fitness"}:
             return f"{val:+.4f}"
-        elif key in {"IC_Mean", "IC_Std", "ICIR", "IC_t统计量"}:
-            return f"{val:+.4f}"
         else:
             return f"{val:+.4f}"
 
-    # ── 布局参数 ────────────────────────────────────────────
-    # 总显示宽度：2（前缀空格） + LABEL_W + 3（空格+│+空格） + VAL_W + 2（后缀空格）
-    LABEL_W = 14   # 标签列显示宽度（汉字占2列，故能容纳约7个汉字）
-    VAL_W   = 12   # 值列宽度（纯 ASCII，rjust 即可）
-    SEP     = " │ "
-    INNER_W = 2 + LABEL_W + len(SEP) + VAL_W + 2   # = 2+14+3+12+2 = 33 列
+    def _evaluate(key: str, val) -> tuple[str, str]:
+        """返回 (评价文字, 背景色HEX)；无定义则返回空字符串和空色。"""
+        if key not in _BANDS:
+            return "", ""
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "—", "#555555"
+        cfg   = _BANDS[key]
+        v     = abs(val)
+        bands = cfg["bands"]
+        if cfg["lower_is_better"]:
+            for upper, label, color in bands:
+                if upper is None or v <= upper:
+                    return label, color
+        else:
+            for i in range(len(bands) - 1, -1, -1):
+                lower = bands[i - 1][0] if i > 0 else 0.0
+                if v >= lower:
+                    return bands[i][1], bands[i][2]
+        return bands[-1][1], bands[-1][2]
 
-    # 标题行（同样用显示宽度居中）
-    title_text = " QuantAlpha Engine — 回测绩效报告 "
-
-    print()
-    print("╔" + "═" * INNER_W + "╗")
-    print("║" + _center_display(title_text, INNER_W) + "║")
-    print("╠" + "═" * INNER_W + "╣")
-
+    # ── 组装表格数据 ─────────────────────────────────────────
     display_order = [
-        ("年化收益率",    "年化收益率"),
-        ("年化波动率",    "年化波动率"),
-        ("Sharpe_Ratio",  "Sharpe Ratio"),
-        ("Calmar_Ratio",  "Calmar Ratio"),
-        ("最大回撤",      "最大回撤"),
-        ("IC_Mean",       "IC 均值"),
-        ("IC_Std",        "IC 标准差"),
-        ("ICIR",          "ICIR"),
-        ("IC_胜率",        "IC 胜率"),
-        ("IC_t统计量",     "IC t-stat"),
-        ("日均换手率",     "日均换手率"),
-        ("年化手续费",     "年化手续费"),
-        ("Fitness",       "Fitness"),
+        ("年化收益率",  "年化收益率"),
+        ("年化波动率",  "年化波动率"),
+        ("Sharpe_Ratio", "Sharpe Ratio"),
+        ("Calmar_Ratio", "Calmar Ratio"),
+        ("最大回撤",    "最大回撤"),
+        ("IC_Mean",     "IC 均值"),
+        ("IC_Std",      "IC 标准差"),
+        ("ICIR",        "ICIR"),
+        ("IC_胜率",      "IC 胜率"),
+        ("IC_t统计量",   "IC t-stat"),
+        ("日均换手率",   "日均换手率"),
+        ("年化手续费",   "年化手续费"),
+        ("Fitness",     "Fitness"),
     ]
 
-    for key, label in display_order:
-        val = metrics.get(key, np.nan)
-        val_str = fmt(key, val).rjust(VAL_W)           # 值右对齐，固定 VAL_W 列
-        label_str = _ljust_display(label, LABEL_W)     # 标签按显示宽度左对齐
-        print(f"║  {label_str}{SEP}{val_str}  ║")
+    rows       = []   # [(label, val_str, eval_text)]
+    eval_colors = []  # [bg_hex_or_empty]
 
-    print("╚" + "═" * INNER_W + "╝")
-    print()
+    for key, label in display_order:
+        val  = metrics.get(key, np.nan)
+        v_str = _fmt(key, val)
+        e_text, e_color = _evaluate(key, val)
+        rows.append((label, v_str, e_text))
+        eval_colors.append(e_color)
+
+    # ── 尝试用 pandas Styler 在 Jupyter 中渲染 HTML 表格 ────
+    try:
+        import pandas as _pd
+        from IPython.display import display as _display
+
+        df = _pd.DataFrame(rows, columns=["指标", "数值", "评价"])
+
+        def _style_eval(col):
+            styles = []
+            for i, (_, _, e_text) in enumerate(rows):
+                bg = eval_colors[i]
+                if bg:
+                    styles.append(
+                        f"background-color: {bg}; color: white; "
+                        f"font-weight: bold; text-align: center;"
+                    )
+                else:
+                    styles.append("text-align: center; color: #888888;")
+            return styles
+
+        styler = (
+            df.style
+            .set_caption("QuantAlpha Engine — 回测绩效报告")
+            .apply(_style_eval, subset=["评价"])
+            .set_properties(subset=["指标"], **{"text-align": "left",  "font-weight": "bold"})
+            .set_properties(subset=["数值"], **{"text-align": "right", "font-family": "monospace"})
+            .set_table_styles([
+                {"selector": "caption",
+                 "props": "font-size:15px; font-weight:bold; padding:8px 0;"},
+                {"selector": "th",
+                 "props": "background-color:#2c3e50; color:white; "
+                          "text-align:center; padding:6px 14px;"},
+                {"selector": "td",
+                 "props": "padding:5px 14px; border-bottom:1px solid #ddd;"},
+                {"selector": "tr:hover td",
+                 "props": "background-color:#f0f4f8;"},
+            ])
+            .hide(axis="index")
+        )
+        _display(styler)
+
+    except Exception:
+        # ── 终端回退：纯文本对齐输出 ────────────────────────
+        print()
+        print(f"{'指标':<14}  {'数值':>10}  {'评价'}")
+        print("─" * 36)
+        for (label, v_str, e_text), _ in zip(rows, eval_colors):
+            print(f"{label:<14}  {v_str:>10}  {e_text}")
+        print()
