@@ -6,6 +6,7 @@ QuantAlpha_Engine - 工业级因子回测框架
 v2.0 新增：
   - 13 个预构建因子算子（时序 / 量价 / 动量 / 技术指标）
   - fusion 模块：Labeler + StatisticalCombiner + MLCombiner 多因子融合框架
+  - tuning 模块：ParameterTuner 参数调优引擎（笛卡尔积搜索 + 多目标排序）
 
 Quick Start（单因子）::
 
@@ -62,8 +63,9 @@ from quant_alpha_engine.fusion import (
     StatisticalCombiner,
     MLCombiner,
 )
+from quant_alpha_engine.tuning import ParameterTuner
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __author__  = "QuantAlpha_Engine"
 
 __all__ = [
@@ -83,4 +85,6 @@ __all__ = [
     "FactorCombiner",
     "StatisticalCombiner",
     "MLCombiner",
+    # 参数调优（v2.1 新增）
+    "ParameterTuner",
 ]
