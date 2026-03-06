@@ -82,8 +82,9 @@ class DataValidator:
             if not pd.api.types.is_numeric_dtype(data[col]):
                 errors.append(f"列 {col} 不是数值类型")
 
-        # 3. 检查缺失值
-        null_counts = data[required_cols].isnull().sum()
+        # 3. 检查缺失值（volume 允许 NaN，表示停牌日成交量未知）
+        strict_cols = [c for c in required_cols if c != 'volume']
+        null_counts = data[strict_cols].isnull().sum()
         if null_counts.any():
             errors.append(f"存在空值: {null_counts[null_counts > 0].to_dict()}")
 
