@@ -317,9 +317,12 @@ class Report:
             return
 
         # 构建注释标签（百分比）
-        annot = monthly_ret.applymap(
-            lambda v: f"{v*100:.1f}%" if not np.isnan(v) else ""
-        )
+        # pandas 2.1+ 已弃用 DataFrame.applymap，改用 DataFrame.map
+        _fmt_cell = lambda v: f"{v*100:.1f}%" if not np.isnan(v) else ""
+        if hasattr(monthly_ret, "map"):
+            annot = monthly_ret.map(_fmt_cell)
+        else:
+            annot = monthly_ret.applymap(_fmt_cell)
 
         if HAS_SEABORN:
             sns.heatmap(

@@ -56,6 +56,7 @@ from quant_alpha_engine.data.mock_generator import MockDataGenerator, MockData
 from quant_alpha_engine.ops.alpha_ops import AlphaOps
 from quant_alpha_engine.backtest.vector_engine import VectorEngine, BacktestResult
 from quant_alpha_engine.backtest.performance import Performance
+from quant_alpha_engine.backtest.walk_forward import WalkForward, WalkForwardReport
 from quant_alpha_engine.visualization.report import Report
 from quant_alpha_engine.fusion import (
     Labeler,
@@ -64,8 +65,9 @@ from quant_alpha_engine.fusion import (
     MLCombiner,
 )
 from quant_alpha_engine.tuning import ParameterTuner
+from quant_alpha_engine.analysis import FactorAnalyzer
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __author__  = "QuantAlpha_Engine"
 
 __all__ = [
@@ -78,6 +80,8 @@ __all__ = [
     "VectorEngine",
     "BacktestResult",
     "Performance",
+    "WalkForward",
+    "WalkForwardReport",
     # 可视化
     "Report",
     # 因子融合（v2.0 新增）
@@ -87,4 +91,6 @@ __all__ = [
     "MLCombiner",
     # 参数调优（v2.1 新增）
     "ParameterTuner",
+    # 多因子诊断（v2.2 新增）
+    "FactorAnalyzer",
 ]
