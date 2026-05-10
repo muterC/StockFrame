@@ -51,7 +51,16 @@ import numpy as np
 import pandas as pd
 
 from quant_alpha_engine.backtest.performance import Performance
-from quant_alpha_engine.visualization.report import Report
+
+# Report 依赖 matplotlib，做成可选导入：未安装 matplotlib 时仍可正常回测，
+# 仅 BacktestResult.plot() 在调用时报错提示。
+try:
+    from quant_alpha_engine.visualization.report import Report
+    _HAS_REPORT = True
+except ImportError as _report_import_err:  # pragma: no cover
+    Report = None  # type: ignore[assignment]
+    _HAS_REPORT = False
+    _REPORT_IMPORT_ERR = _report_import_err
 
 
 @dataclass
@@ -67,11 +76,17 @@ class BacktestResult:
     cost_series   : 每日交易成本
     weights       : 持仓权重矩阵 (T × N)
     turnover      : 每日单边换手率
-    ic_series     : 每日截面 Rank IC
-    forward_returns: 前向 1 日收益率矩阵
+    ic_series     : 每日截面 Rank IC（默认 1 日 forward）
+    forward_returns: 同行对齐的当日收益矩阵
     factor        : 输入因子矩阵（对齐后）
     metrics       : 所有绩效指标字典
     rebalance_dates: 实际调仓日期列表
+    quantile_returns: T × n_quantiles 分组日收益（Q1最小、Qn最大）
+    quantile_navs   : T × n_quantiles 分组净值曲线
+    monotonicity_score: 分组均值与组号的 Spearman rank corr，[-1, 1]
+    long_short_metrics: {LS_Sharpe, LS_AnnReturn, LS_AnnVol, LS_MaxDD}
+    ic_decay      : 多窗口 IC 时序矩阵 (T × len(horizons))
+    ic_decay_mean : {horizon: IC_Mean} 汇总
     """
     nav:             pd.Series
     daily_returns:   pd.Series
@@ -84,6 +99,13 @@ class BacktestResult:
     factor:          pd.DataFrame
     metrics:         dict
     rebalance_dates: list = field(default_factory=list)
+    # ── 新增：分组单调性 / 多窗口 IC 衰减 ──
+    quantile_returns:    Optional[pd.DataFrame] = None
+    quantile_navs:       Optional[pd.DataFrame] = None
+    monotonicity_score:  Optional[float]        = None
+    long_short_metrics:  Optional[dict]         = None
+    ic_decay:            Optional[pd.DataFrame] = None
+    ic_decay_mean:       Optional[dict]         = None
 
     def print_summary(self) -> None:
         """在控制台打印 Unicode 格式绩效报告。"""
@@ -97,6 +119,12 @@ class BacktestResult:
         ----------
         save_path : 若指定路径，则保存为 PNG 文件；否则弹窗显示
         """
+        if not _HAS_REPORT:
+            raise ImportError(
+                "绘图功能依赖 matplotlib（及可选 seaborn），请先安装：\n"
+                "    pip install matplotlib seaborn\n"
+                f"原始导入错误：{_REPORT_IMPORT_ERR}"
+            )
         Report.plot(self, save_path=save_path)
 
 
@@ -274,6 +302,36 @@ class VectorEngine:
         # Step 10: 获取实际调仓日期
         rebalance_dates = self._get_rebalance_dates(factor.index)
 
+        # Step 11: 分组单调性 + 多窗口 IC 衰减（新增）
+        quantile_returns   = None
+        quantile_navs      = None
+        monotonicity_score = None
+        ls_metrics         = None
+        if self.n_quantiles and self.n_quantiles >= 2:
+            print(f"[VectorEngine] 计算 {self.n_quantiles} 分组单调性...")
+            quantile_returns = Performance.calc_quantile_returns(
+                factor, ret, n_quantiles=self.n_quantiles,
+            )
+            quantile_navs = (1 + quantile_returns.fillna(0.0)).cumprod()
+            monotonicity_score = Performance.calc_monotonicity_score(quantile_returns)
+            ls_metrics = Performance.calc_long_short_sharpe(
+                quantile_returns, cost_rate=self.cost_rate,
+            )
+            metrics["分组单调性"]  = monotonicity_score
+            metrics["LS_Sharpe"]   = ls_metrics["LS_Sharpe"]
+            metrics["LS_AnnReturn"] = ls_metrics["LS_AnnReturn"]
+
+        ic_decay      = None
+        ic_decay_mean = None
+        if self.ic_horizons:
+            print(f"[VectorEngine] 计算多窗口 IC 衰减 horizons={self.ic_horizons}...")
+            ic_decay = Performance.calc_ic_decay(
+                factor, close, horizons=self.ic_horizons,
+            )
+            ic_decay_mean = Performance.calc_ic_decay_summary(ic_decay)
+            for h_key, v in ic_decay_mean.items():
+                metrics[h_key] = v
+
         print("[VectorEngine] 回测完成！\n")
 
         return BacktestResult(
@@ -288,6 +346,12 @@ class VectorEngine:
             factor          = factor,
             metrics         = metrics,
             rebalance_dates = rebalance_dates,
+            quantile_returns    = quantile_returns,
+            quantile_navs       = quantile_navs,
+            monotonicity_score  = monotonicity_score,
+            long_short_metrics  = ls_metrics,
+            ic_decay            = ic_decay,
+            ic_decay_mean       = ic_decay_mean,
         )
 
     # ------------------------------------------------------------------

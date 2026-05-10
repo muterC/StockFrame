@@ -222,9 +222,11 @@ def _build_styled_df(df: pd.DataFrame, metric_cols: List[str]) -> "pd.io.formats
     styler = df.style
 
     # 应用颜色
+    # pandas 2.1+ 已弃用 Styler.applymap，改用 Styler.map
     for col in metric_cols:
         if col in df.columns:
-            styler = styler.applymap(
+            _apply = getattr(styler, "map", None) or styler.applymap
+            styler = _apply(
                 lambda v, m=col: _style_cell(v, m),
                 subset=[col],
             )

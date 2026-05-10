@@ -256,19 +256,24 @@ class AlphaOps:
         pd.DataFrame : 线性衰减加权平均值
         """
         # 权重向量 [1, 2, ..., d]，最旧的权重为 1，最新的权重为 d
-        weights = np.arange(1, d + 1, dtype=np.float64)
-        weights /= weights.sum()
+        full_weights = np.arange(1, d + 1, dtype=np.float64)
 
         def _weighted_mean(x: np.ndarray) -> float:
-            if np.any(np.isnan(x)):
-                # 有 NaN 时用有效数据重新加权
-                valid_mask = ~np.isnan(x)
-                if valid_mask.sum() < max(1, d // 2):
-                    return np.nan
-                w = weights[valid_mask]
-                w = w / w.sum()
-                return np.dot(w, x[valid_mask])
-            return np.dot(weights, x)
+            # 边界期 x 长度可能 < d（min_periods 允许部分窗口），
+            # 截取最近 len(x) 个权重（保持「越近权重越大」语义）
+            w = full_weights[-len(x):]
+            valid_mask = ~np.isnan(x)
+            n_valid = int(valid_mask.sum())
+            if n_valid < max(1, d // 2):
+                return np.nan
+            if n_valid == len(x):
+                w_norm = w / w.sum()
+                return float(np.dot(w_norm, x))
+            w_v = w[valid_mask]
+            total = w_v.sum()
+            if total <= 0:
+                return np.nan
+            return float(np.dot(w_v / total, x[valid_mask]))
 
         return df.rolling(window=d, min_periods=max(1, d // 2)).apply(
             _weighted_mean, raw=True
