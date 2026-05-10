@@ -204,6 +204,9 @@ class VectorEngine:
         # ── 回测时间范围控制 ───────────────────────────────────
         start_date: Optional[str]                           = None,
         end_date:   Optional[str]                           = None,
+        # ── 分组单调性 / 多窗口 IC 衰减 ────────────────────────
+        n_quantiles: int                                    = 10,
+        ic_horizons: tuple                                  = (1, 5, 10, 20),
     ):
         self.factor         = factor
         self.close          = close
@@ -219,6 +222,8 @@ class VectorEngine:
         self.industry       = industry
         self.start_date     = start_date
         self.end_date       = end_date
+        self.n_quantiles    = int(n_quantiles) if n_quantiles else 0
+        self.ic_horizons    = tuple(ic_horizons) if ic_horizons else ()
 
     # ------------------------------------------------------------------
     # 主入口
