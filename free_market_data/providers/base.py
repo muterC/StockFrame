@@ -32,6 +32,7 @@ class BaseProvider:
 
     name = "base"
     daily_adjustments: Sequence[str] = ("",)
+    daily_direct_fields: Sequence[str] = ()
 
     def fetch_daily(
         self,

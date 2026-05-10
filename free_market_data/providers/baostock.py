@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 from typing import Optional, Sequence, Union
 
 import pandas as pd
@@ -13,6 +15,25 @@ from .base import BaseProvider
 class BaoStockProvider(BaseProvider):
     name = "baostock"
     daily_adjustments = ("", "qfq", "hfq")
+    daily_direct_fields = (
+        "date",
+        "stock_code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "volume",
+        "amount",
+        "turnover",
+        "pct_change",
+        "pe_ttm",
+        "pb",
+        "ps_ttm",
+        "pcf_ttm",
+        "trade_status",
+        "is_st",
+    )
 
     def fetch_daily(self, code: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
         return self.fetch_daily_adjusted(code, start_date, end_date, "")
@@ -37,10 +58,12 @@ class BaoStockProvider(BaseProvider):
                 "peTTM",
                 "pbMRQ",
                 "psTTM",
+                "pcfNcfTTM",
+                "tradestatus",
                 "isST",
             ]
         )
-        login = bs.login()
+        login = self._call_silently(bs.login)
         if login.error_code != "0":
             raise RuntimeError(login.error_msg)
         try:
@@ -59,7 +82,7 @@ class BaoStockProvider(BaseProvider):
                 return pd.DataFrame()
             raw = pd.DataFrame(rows, columns=query.fields)
         finally:
-            bs.logout()
+            self._call_silently(bs.logout)
 
         frame = raw.rename(
             columns={
@@ -70,6 +93,8 @@ class BaoStockProvider(BaseProvider):
                 "peTTM": "pe_ttm",
                 "pbMRQ": "pb",
                 "psTTM": "ps_ttm",
+                "pcfNcfTTM": "pcf_ttm",
+                "tradestatus": "trade_status",
                 "isST": "is_st",
             }
         )
@@ -94,7 +119,7 @@ class BaoStockProvider(BaseProvider):
         adjustflag = {"hfq": "1", "qfq": "2", "": "3", None: "3"}.get(adjust, "3")
         fields = ",".join(["date", "time", "code", "open", "high", "low", "close", "volume", "amount", "adjustflag"])
 
-        login = bs.login()
+        login = self._call_silently(bs.login)
         if login.error_code != "0":
             raise RuntimeError(login.error_msg)
         try:
@@ -113,7 +138,7 @@ class BaoStockProvider(BaseProvider):
                 raise RuntimeError("BaoStock 分钟线接口返回空数据。")
             raw = pd.DataFrame(rows, columns=query.fields)
         finally:
-            bs.logout()
+            self._call_silently(bs.logout)
 
         frame = raw.rename(columns={"code": "stock_code"})
         time_text = frame["time"].astype(str).str.slice(0, 14)
@@ -141,3 +166,8 @@ class BaoStockProvider(BaseProvider):
         if not frames:
             raise RuntimeError("BaoStock 不提供实时行情接口，最新日线快照也为空。")
         return pd.concat(frames, ignore_index=True)
+
+    @staticmethod
+    def _call_silently(func, *args, **kwargs):
+        with redirect_stdout(StringIO()):
+            return func(*args, **kwargs)

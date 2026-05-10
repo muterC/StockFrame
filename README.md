@@ -1638,7 +1638,7 @@ result_rf.print_summary()
 
 免费数据服务已经独立放在 `free_market_data/`，不再挂在 `quant_alpha_engine` 下面。最终用户只需要实例化 `FreeMarketDataStore`；akshare、baostock、Yahoo、腾讯、雪球等数据源被拆成 provider 类，并由最终的 `Provider` 门面统一给数据库使用。日线数据会遍历全部配置的 provider 后再按日期融合，主 OHLC 字段保留未复权价格，同时保存 `qfq_factor` 和 `hfq_factor`，需要复权价格时用 `close * qfq_factor` 或 `close * hfq_factor` 计算。
 
-复权因子由 `Provider.fetch_daily` 负责生成，不由 TSV 数据库补算。每个具体 provider 先取未复权日线，再用同一个 provider 的前复权/后复权日线计算 `qfq_factor` 和 `hfq_factor`；如果某个 provider 不能同时提供未复权 OHLC 与两个因子，该 provider 的日线包会被跳过。融合时 `open/high/low/close/qfq_factor/hfq_factor` 被当成同源包处理，不允许后续 provider 覆盖其中一部分；`price_source` 标记这个同源包来自哪个 provider，`source` 则记录该行最终使用过哪些 provider 字段。
+复权因子由 `Provider.fetch_daily` 负责生成，不由 TSV 数据库补算。每个具体 provider 先取未复权日线，再用同一个 provider 的前复权/后复权日线计算 `qfq_factor` 和 `hfq_factor`；如果某个 provider 不能同时提供未复权 OHLC 与两个因子，该 provider 的日线包会被跳过。融合时 `open/high/low/close/qfq_factor/hfq_factor` 被当成同源包处理，不允许后续 provider 覆盖其中一部分；`price_source` 标记这个同源包来自哪个 provider，`source` 则记录该行最终使用过哪些 provider 字段。除复权因子外，schema 中的 provider 字段只登记数据源日线接口直接返回或直接映射的字段，不在数据库层手算技术特征。
 
 每个 provider 都保留 `fetch_daily`、`fetch_minute`、`fetch_realtime` 三个可调用入口；能从该数据源获取的接口会真实请求并解析，数据源自身不支持或需要登录态时会抛出清晰错误，由最终 `Provider` 记录后继续尝试后续数据源。雪球接口需要设置 `XUEQIU_COOKIE`，或手动创建 `XueqiuProvider(cookie="...")` 后注册。
 
@@ -1650,7 +1650,7 @@ store = FreeMarketDataStore(
     stock_codes=["600000.SH", "000001.SZ"],  # 传入股票池时，默认预热近 1 年日线
     daily_fields={
         "default": ["open", "high", "low", "close", "volume", "amount", "qfq_factor", "hfq_factor"],
-        "baostock": ["open", "high", "low", "close", "volume", "amount", "pe_ttm", "pb", "ps_ttm"],
+        "baostock": ["open", "high", "low", "close", "volume", "amount", "pe_ttm", "pb", "ps_ttm", "pcf_ttm", "trade_status", "is_st"],
     },
 )
 

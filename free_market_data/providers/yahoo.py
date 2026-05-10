@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from typing import Optional, Sequence, Union
 
 import pandas as pd
@@ -12,11 +14,13 @@ from .base import BaseProvider
 
 class YahooProvider(BaseProvider):
     name = "yahoo"
+    daily_direct_fields = ("date", "stock_code", "open", "high", "low", "close", "adj_close", "volume")
 
     def fetch_daily(self, code: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
         import yfinance as yf
 
-        raw = yf.download(
+        raw = self._call_silently(
+            yf.download,
             to_yahoo_symbol(code),
             start=start_date.strftime("%Y-%m-%d"),
             end=(end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
@@ -52,7 +56,8 @@ class YahooProvider(BaseProvider):
         import yfinance as yf
 
         interval = period if period.endswith("m") else f"{period}m"
-        raw = yf.Ticker(to_yahoo_symbol(code)).history(
+        raw = self._call_silently(
+            yf.Ticker(to_yahoo_symbol(code)).history,
             interval=interval,
             start=as_timestamp(start_date).strftime("%Y-%m-%d") if start_date is not None else None,
             end=as_timestamp(end_date).strftime("%Y-%m-%d") if end_date is not None else None,
@@ -97,3 +102,8 @@ class YahooProvider(BaseProvider):
                 }
             )
         return pd.DataFrame(rows).dropna(how="all", subset=["price", "open", "high", "low", "pre_close"])
+
+    @staticmethod
+    def _call_silently(func, *args, **kwargs):
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            return func(*args, **kwargs)

@@ -16,6 +16,7 @@ from .base import BaseProvider
 class TencentProvider(BaseProvider):
     name = "tencent"
     daily_adjustments = ("", "qfq", "hfq")
+    daily_direct_fields = ("date", "stock_code", "open", "high", "low", "close", "volume", "amount")
 
     def fetch_daily(self, code: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
         return self.fetch_daily_adjusted(code, start_date, end_date, "")

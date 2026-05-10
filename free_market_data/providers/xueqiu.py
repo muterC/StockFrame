@@ -17,6 +17,26 @@ from .base import BaseProvider
 class XueqiuProvider(BaseProvider):
     name = "xueqiu"
     daily_adjustments = ("", "qfq", "hfq")
+    daily_direct_fields = (
+        "date",
+        "stock_code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "volume_post",
+        "amount_post",
+        "change",
+        "pct_change",
+        "turnover",
+        "pe_ttm",
+        "pb",
+        "ps_ttm",
+        "pcf_ttm",
+        "total_market_cap",
+    )
 
     def __init__(self, cookie: Optional[str] = None, user_agent: Optional[str] = None) -> None:
         self.cookie = cookie or os.getenv("XUEQIU_COOKIE")
@@ -38,7 +58,7 @@ class XueqiuProvider(BaseProvider):
                 "period": "day",
                 "type": {"": "normal", None: "normal", "qfq": "before", "hfq": "after"}.get(adjustment, "normal"),
                 "count": -count,
-                "indicator": "kline,pe,pb,ps,market_capital",
+                "indicator": "kline,pe,pb,ps,pcf,market_capital",
             }
         )
         payload = self._request_json(f"https://stock.xueqiu.com/v5/stock/chart/kline.json?{query}")
@@ -55,6 +75,7 @@ class XueqiuProvider(BaseProvider):
                 "turnoverrate": "turnover",
                 "pe": "pe_ttm",
                 "ps": "ps_ttm",
+                "pcf": "pcf_ttm",
                 "market_capital": "total_market_cap",
             }
         )

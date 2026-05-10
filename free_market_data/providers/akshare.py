@@ -13,6 +13,20 @@ from .base import BaseProvider
 class AkShareProvider(BaseProvider):
     name = "akshare"
     daily_adjustments = ("", "qfq", "hfq")
+    daily_direct_fields = (
+        "date",
+        "stock_code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "amplitude",
+        "pct_change",
+        "change",
+        "turnover",
+    )
 
     def fetch_daily(self, code: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
         return self.fetch_daily_adjusted(code, start_date, end_date, "")
