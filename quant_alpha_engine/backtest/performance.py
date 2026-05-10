@@ -126,6 +126,62 @@ class Performance:
         return float(drawdown.min())
 
     @staticmethod
+    def calc_max_drawdown_detailed(nav: pd.Series) -> Dict[str, Any]:
+        """
+        最大回撤详情：值、起止日期、持续天数、是否已修复。
+
+        定义：
+            MaxDD_StartDate     ：进入最大回撤前的最后一个高点日期（峰值日）
+            MaxDD_EndDate       ：净值跌到最低的那一天（谷底日）
+            MaxDD_RecoveryDate  ：净值首次回到峰值的日期；若区间内未修复则为 None
+            MaxDD_Duration      ：从峰值日到修复日（或区间末日）的交易日数
+
+        Returns
+        -------
+        dict : keys = {MaxDD, MaxDD_Duration, MaxDD_StartDate,
+                       MaxDD_EndDate, MaxDD_RecoveryDate, MaxDD_Recovered}
+        """
+        empty = {
+            "MaxDD":              0.0,
+            "MaxDD_Duration":     0,
+            "MaxDD_StartDate":    None,
+            "MaxDD_EndDate":      None,
+            "MaxDD_RecoveryDate": None,
+            "MaxDD_Recovered":    True,
+        }
+        if nav is None or len(nav) < 2:
+            return empty
+
+        rolling_max = nav.cummax()
+        drawdown    = (nav - rolling_max) / rolling_max
+        end_idx     = drawdown.idxmin()
+        mdd_val     = float(drawdown.loc[end_idx])
+        if mdd_val == 0.0:
+            return empty
+
+        peak_val = float(rolling_max.loc[end_idx])
+        # 峰值日：end 之前最后一个 nav >= peak 的日期
+        pre = nav.loc[:end_idx]
+        start_idx = pre[pre >= peak_val].index[-1] if (pre >= peak_val).any() else nav.index[0]
+        # 修复日：end 之后首次 nav >= peak
+        post = nav.loc[end_idx:]
+        rec_mask = post >= peak_val
+        recovery_idx = post[rec_mask].index[0] if rec_mask.any() else None
+        recovered = recovery_idx is not None
+        # 持续天数：从峰值到（修复日 or 区间末日）
+        end_for_dur = recovery_idx if recovered else nav.index[-1]
+        duration = int(nav.loc[start_idx:end_for_dur].shape[0])
+
+        return {
+            "MaxDD":              mdd_val,
+            "MaxDD_Duration":     duration,
+            "MaxDD_StartDate":    start_idx,
+            "MaxDD_EndDate":      end_idx,
+            "MaxDD_RecoveryDate": recovery_idx,
+            "MaxDD_Recovered":    recovered,
+        }
+
+    @staticmethod
     def calc_calmar(nav: pd.Series) -> float:
         """
         Calmar 比率 = 年化收益率 / |最大回撤|。
@@ -471,7 +527,8 @@ class Performance:
         sharpe  = Performance.calc_sharpe(daily_returns)
         ann_ret = Performance.calc_annualized_return(nav)
         ann_vol = Performance.calc_annualized_volatility(daily_returns)
-        mdd     = Performance.calc_max_drawdown(nav)
+        mdd_info = Performance.calc_max_drawdown_detailed(nav)
+        mdd     = mdd_info["MaxDD"]
         calmar  = Performance.calc_calmar(nav)
 
         turnover  = Performance.calc_turnover(weights)
@@ -492,6 +549,11 @@ class Performance:
             "Sharpe_Ratio":  sharpe,
             "Calmar_Ratio":  calmar,
             "最大回撤":       mdd,
+            "最大回撤_天数":   mdd_info["MaxDD_Duration"],
+            "最大回撤_峰值日": mdd_info["MaxDD_StartDate"],
+            "最大回撤_谷底日": mdd_info["MaxDD_EndDate"],
+            "最大回撤_修复日": mdd_info["MaxDD_RecoveryDate"],
+            "最大回撤_已修复": mdd_info["MaxDD_Recovered"],
             # IC 指标
             "IC_Mean":       ic_stats["IC_Mean"],
             "IC_Std":        ic_stats["IC_Std"],
