@@ -73,6 +73,12 @@ result.plot()            # 生成 6 子图分析报告
 ## 目录结构
 
 ```
+free_market_data/                  # 独立免费数据服务，不耦合 quant_alpha_engine
+├── store.py                       # FreeMarketDataStore，唯一推荐用户入口
+├── schema.py                      # TSV 字段描述和默认字段
+├── symbols.py                     # 股票代码标准化
+└── providers/                     # akshare / baostock / Yahoo / 腾讯 / 雪球 provider
+
 quant_alpha_engine/
 ├── __init__.py                    # 统一导出，一行导入所有模块（v2.0.0）
 ├── data/
@@ -143,6 +149,9 @@ pip install -r requirements.txt
 | seaborn | 0.12 | 热力图（可选，无则降级） |
 | scipy | 1.10 | KDE、正态拟合、OLS、min-variance 优化 |
 | **scikit-learn** | **1.3** | **🆕 MLCombiner 机器学习融合（必选）** |
+| akshare | 1.12 | A 股日线、分钟、实时行情免费数据源 |
+| baostock | 0.8.9 | A 股日线和估值字段备用数据源 |
+| yfinance | 0.2.36 | Yahoo Finance 日线、分钟、实时备用数据源 |
 
 > **可选依赖：** 若需使用 `MLCombiner(model_type='xgboost')`，额外安装：
 > ```bash
@@ -241,8 +250,6 @@ print(data.industry.value_counts())     # 各行业股票数量分布
 bear_gen  = MockDataGenerator(mu=-0.05, sigma=0.45, seed=100)
 bear_data = bear_gen.generate()
 ```
-
----
 
 ### 2. AlphaOps — 算子库
 
@@ -1628,6 +1635,52 @@ result_rf.print_summary()
 ---
 
 ## 使用真实数据
+
+免费数据服务已经独立放在 `free_market_data/`，不再挂在 `quant_alpha_engine` 下面。最终用户只需要实例化 `FreeMarketDataStore`；akshare、baostock、Yahoo、腾讯、雪球等数据源被拆成 provider 类，并由最终的 `Provider` 门面统一给数据库使用。日线数据会遍历全部配置的 provider 后再按日期融合，主 OHLC 字段保留未复权价格，同时保存 `qfq_factor` 和 `hfq_factor`，需要复权价格时用 `close * qfq_factor` 或 `close * hfq_factor` 计算。
+
+复权因子由 `Provider.fetch_daily` 负责生成，不由 TSV 数据库补算。每个具体 provider 先取未复权日线，再用同一个 provider 的前复权/后复权日线计算 `qfq_factor` 和 `hfq_factor`；如果某个 provider 不能同时提供未复权 OHLC 与两个因子，该 provider 的日线包会被跳过。融合时 `open/high/low/close/qfq_factor/hfq_factor` 被当成同源包处理，不允许后续 provider 覆盖其中一部分；`price_source` 标记这个同源包来自哪个 provider，`source` 则记录该行最终使用过哪些 provider 字段。除复权因子外，schema 中的 provider 字段只登记数据源日线接口直接返回或直接映射的字段，不在数据库层手算技术特征。
+
+每个 provider 都保留 `fetch_daily`、`fetch_minute`、`fetch_realtime` 三个可调用入口；能从该数据源获取的接口会真实请求并解析，数据源自身不支持或需要登录态时会抛出清晰错误，由最终 `Provider` 记录后继续尝试后续数据源。雪球接口需要设置 `XUEQIU_COOKIE`，或手动创建 `XueqiuProvider(cookie="...")` 后注册。
+
+```python
+from free_market_data import FreeMarketDataStore
+
+store = FreeMarketDataStore(
+    db_path="data/free_market_db",
+    stock_codes=["600000.SH", "000001.SZ"],  # 传入股票池时，默认预热近 1 年日线
+    daily_fields={
+        "default": ["open", "high", "low", "close", "volume", "amount", "qfq_factor", "hfq_factor"],
+        "baostock": ["open", "high", "low", "close", "volume", "amount", "pe_ttm", "pb", "ps_ttm", "pcf_ttm", "trade_status", "is_st"],
+    },
+)
+
+# 日线：优先读本地 TSV；缺口自动遍历 provider、融合字段并回写数据库
+daily = store.get_daily(
+    stock_codes=["600000.SH", "000001.SZ"],
+    start_date="2024-01-01",
+    end_date="2024-12-31",
+)
+
+# 回测常用 T × N 矩阵
+matrices = store.get_daily(
+    ["600000.SH", "000001.SZ"],
+    "2024-01-01",
+    "2024-12-31",
+    fields=["close", "volume"],
+    return_format="dict",
+)
+close = matrices["close"]
+volume = matrices["volume"]
+
+# 字段管理：市值、财报、北向资金等字段可后续补入 TSV 库
+store.add_field("northbound_net_buy", "北向资金净买入额")
+fields = store.describe_fields()
+issues = store.validate_database()
+
+# 分钟级 / 实时数据直连 provider，不写入本地数据库
+minute = store.get_minute("600000.SH", period="5m")
+realtime = store.get_realtime(["600000.SH", "000001.SZ"])
+```
 
 将框架应用到真实数据时，只需将数据组织为正确格式的 DataFrame：
 
