@@ -9,12 +9,12 @@ from typing import Callable, Dict, Iterable, Literal, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-from .providers import DEFAULT_PROVIDER_CLASSES, BaseProvider, Provider
+from .providers import DEFAULT_PROVIDER_CLASSES, BaseProvider, HyperProvider
 from .providers.base import FieldSelection
 from .schema import DAILY_INDEX_COLUMNS, DEFAULT_FIELD_DESCRIPTIONS, FIELD_DESCRIPTION_COLUMNS
 from .symbols import as_timestamp, normalize_codes, normalize_stock_code
 
-ProviderName = Literal["akshare", "baostock", "yahoo", "tencent", "xueqiu"]
+ProviderName = Literal["akshare", "baostock", "yahoo", "tencent", "xueqiu", "sina", "sohu"]
 ReturnFormat = Literal["long", "wide", "dict"]
 DAILY_PROVIDER_PACKAGE_COLUMNS = ["open", "high", "low", "close", "qfq_factor", "hfq_factor", "price_source"]
 
@@ -30,13 +30,13 @@ class FreeMarketDataStore:
     def __init__(
         self,
         db_path: Union[str, Path] = "data/free_market_db",
-        providers: Sequence[str] = ("akshare", "baostock", "yahoo", "tencent", "xueqiu"),
+        providers: Sequence[str] = ("akshare", "baostock", "yahoo", "tencent", "xueqiu", "sina", "sohu"),
         stock_codes: Optional[Sequence[str]] = None,
         history_years: int = 1,
         auto_initialize: bool = True,
         auto_warmup: bool = True,
         provider_instances: Optional[Sequence[BaseProvider]] = None,
-        provider: Optional[Provider] = None,
+        provider: Optional[HyperProvider] = None,
         daily_fields: FieldSelection = None,
         minute_fields: FieldSelection = None,
         realtime_fields: FieldSelection = None,
@@ -50,12 +50,10 @@ class FreeMarketDataStore:
         self.field_description_path = self.meta_dir / "field_descriptions.tsv"
         self._field_fetchers: Dict[str, Callable[..., pd.DataFrame]] = {}
         provider_map: Dict[str, BaseProvider] = {name: cls() for name, cls in DEFAULT_PROVIDER_CLASSES.items()}
-        self.provider = provider or Provider(
+        self.provider = provider or HyperProvider(
             provider_map=provider_map,
             provider_order=self.providers,
             daily_fields=daily_fields,
-            minute_fields=minute_fields,
-            realtime_fields=realtime_fields,
         )
 
         for provider in provider_instances or []:
