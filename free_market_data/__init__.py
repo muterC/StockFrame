@@ -1,6 +1,6 @@
 """Standalone free market data package."""
 
+from .daily_db import HyperDailyTsvDatabase
 from .providers import BaseProvider, HyperProvider
-from .store import FreeMarketDataStore
 
-__all__ = ["BaseProvider", "HyperProvider", "FreeMarketDataStore"]
+__all__ = ["BaseProvider", "HyperProvider", "HyperDailyTsvDatabase"]

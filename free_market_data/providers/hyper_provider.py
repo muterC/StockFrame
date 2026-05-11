@@ -265,6 +265,26 @@ class HyperProvider:
             else:
                 selected = [selected_fields] if isinstance(selected_fields, str) else list(selected_fields)
             columns = [column for column in ["stock_code", *selected] if column in result.columns]
+            missing_codes = sorted(set(normalized_codes) - set(result["stock_code"].dropna().astype(str)))
+            if missing_codes:
+                errors[provider.name] = f"缺少股票代码: {missing_codes}"
+                continue
+
+            required_columns = [column for column in selected if column not in {"name", "source"}]
+            missing_columns = [column for column in required_columns if column not in result.columns]
+            if missing_columns:
+                errors[provider.name] = f"缺少字段: {missing_columns}"
+                continue
+
+            invalid_columns = [
+                column
+                for column in required_columns
+                if column != "timestamp" and result[column].isna().any()
+            ]
+            if invalid_columns:
+                errors[provider.name] = f"字段存在空值: {invalid_columns}"
+                continue
+
             return result.loc[:, list(dict.fromkeys(columns))].reset_index(drop=True)
 
         raise RuntimeError(f"无法获取实时行情: {errors}")
